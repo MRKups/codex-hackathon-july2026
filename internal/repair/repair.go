@@ -1,4 +1,4 @@
-// Package repair verifies generated Go candidates and will own the repair loop.
+// Package repair verifies generated Go candidates and runs the repair loop.
 package repair
 
 import (
@@ -11,9 +11,97 @@ import (
 	"time"
 
 	"codex-hackathon-july2026/internal/domain"
+	"codex-hackathon-july2026/internal/llm"
+	"codex-hackathon-july2026/internal/prompt"
 )
 
 const verifierTimeoutOutput = "verifier timeout — generated code may have hung"
+
+// AttemptReporter receives each completed verification synchronously. A nil reporter disables
+// progress reporting; a reporter error stops the loop and is returned to the caller.
+type AttemptReporter func(domain.Attempt) error
+
+// Repair generates and verifies up to maxAttempts candidates for an authored-oracle task. It
+// returns the last completed attempt and only returns an error for caller or infrastructure
+// failures. A failed verifier result is a normal attempt, not an error.
+func Repair(
+	ctx context.Context,
+	coder llm.LLM,
+	task domain.Task,
+	maxAttempts int,
+	testTimeout time.Duration,
+	report AttemptReporter,
+) (domain.Attempt, error) {
+	if ctx == nil {
+		return domain.Attempt{}, errors.New("repair context is required")
+	}
+	if coder == nil {
+		return domain.Attempt{}, errors.New("coder is required")
+	}
+	if maxAttempts <= 0 {
+		return domain.Attempt{}, errors.New("max attempts must be greater than zero")
+	}
+	if testTimeout <= 0 {
+		return domain.Attempt{}, errors.New("verifier timeout must be greater than zero")
+	}
+	if strings.TrimSpace(task.TestCode) == "" {
+		return domain.Attempt{}, errors.New("task test code is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return domain.Attempt{}, err
+	}
+
+	var last domain.Attempt
+	for attemptNumber := 1; attemptNumber <= maxAttempts; attemptNumber++ {
+		code, err := generate(ctx, coder, task.Spec, task.Signature, last)
+		if err != nil {
+			return last, err
+		}
+
+		passed, output, err := runTests(ctx, task, code, testTimeout)
+		if err != nil {
+			return last, err
+		}
+
+		last = domain.Attempt{
+			N:      attemptNumber,
+			Code:   code,
+			Passed: passed,
+			Output: output,
+		}
+		if report != nil {
+			if err := report(last); err != nil {
+				return last, err
+			}
+		}
+		if passed {
+			return last, nil
+		}
+	}
+
+	return last, nil
+}
+
+// generate asks the coder for candidate source. Its primitive inputs deliberately prevent task
+// test source from entering a coder prompt.
+func generate(ctx context.Context, coder llm.LLM, spec, signature string, previous domain.Attempt) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
+	var promptText string
+	if previous.N == 0 {
+		promptText = prompt.FirstPrompt(spec, signature)
+	} else {
+		promptText = prompt.RepairPrompt(spec, signature, previous.Code, previous.Output)
+	}
+
+	raw, err := coder.Complete(ctx, promptText)
+	if err != nil {
+		return "", err
+	}
+	return prompt.ExtractGoCode(raw), nil
+}
 
 // runTests verifies code against the authored oracle in task. A non-zero Go command exit is
 // failed-attempt feedback; setup, cancellation, cleanup, and command-launch failures are errors.

@@ -13,7 +13,14 @@ that owns it.
 ├── .gitignore
 ├── AGENTS.md
 ├── README.md
+├── _archive/
+│   └── web/
+│       └── embed.go             # Superseded standalone-asset embedding sketch
 ├── go.mod                        # Module codex-hackathon-july2026 + Go 1.26
+├── cmd/
+│   └── repair/                    # Fixed authored demo: terminal or -serve [F4/F8]
+│       ├── main.go
+│       └── main_test.go
 ├── internal/
 │   ├── domain/                   # Shared Task and Attempt values; imports nothing [C3]
 │   │   └── domain.go
@@ -25,9 +32,17 @@ that owns it.
 │   ├── prompt/                   # Pure coder prompts + conservative extraction [F2]
 │   │   ├── prompt.go
 │   │   └── prompt_test.go
-│   └── repair/                   # Authored-oracle temp-module verifier [F3]
+│   ├── repair/                   # Verifier [F3] + coder-only repair loop [F4]
 │       ├── repair.go
 │       └── repair_test.go
+│   ├── run/                      # Asynchronous in-memory run snapshots [F7]
+│   │   ├── run.go
+│   │   └── run_test.go
+│   └── server/                   # HTTP API + embedded plain browser UI [F8/F9]
+│       ├── assets.go
+│       ├── index.html
+│       ├── server.go
+│       └── server_test.go
 └── docs/
     ├── go-repair-loop.md
     ├── app-architecture.md
@@ -38,16 +53,14 @@ that owns it.
 
 F1 is complete: a configured provider returned one real, non-empty completion on 2026-07-18.
 `.env` is a local, Git-ignored copy of `.env.example`; source it to provide provider variables
-to the live smoke test. C3 is complete: `internal/domain` owns the shared data without creating
-an upward import path. F2 is complete: `internal/prompt` is dependency-free and has no path for
-oracle source to enter a coder prompt. F3 is complete: `internal/repair` writes candidate and
-authored test source verbatim to a disposable module, then builds and tests it. F4 is next;
-every other target path remains planned.
+to the live smoke test. C3, F2, F3, and F4 provide the authored-oracle loop. F7 stores live
+snapshots, F8 serves the small local API, and F9 embeds the comparison-first browser page. The
+fixed split-cents oracle currently lives in `cmd/repair/main.go`; task folders and generated
+oracles remain future work.
 
 ## Target Structure
 
-The following layout is the intended end state. Paths marked F2 onward are not created
-until their tracker item starts.
+The following layout is the intended end state. Paths marked F15 onward remain planned.
 
 ```
 .
@@ -80,12 +93,10 @@ until their tracker item starts.
 │   │   └── task.go
 │   ├── run/                      # Orchestration + in-memory Run store (goroutine per run)  [F7]
 │   │   └── run.go
-│   └── server/                   # HTTP handlers: POST /run, GET /run/{id}                  [F8]
+│   └── server/                   # HTTP + embedded plain browser UI                         [F8/F9]
+│       ├── assets.go             #   //go:embed index.html
+│       ├── index.html            #   single-file UI (vanilla JS, polls /run/{id})
 │       └── server.go
-│
-├── web/                          # Frontend — embedded into the binary                     [F9]
-│   ├── embed.go                  #   //go:embed index.html
-│   └── index.html                #   single-file UI (vanilla JS, polls /run/{id})
 │
 ├── tasks/                        # Task definitions: spec + optional authored oracle        [F6]
 │   ├── example-generated/
@@ -109,13 +120,13 @@ until their tracker item starts.
 - **Two kinds of tests, kept apart.**
   - *Project tests* (`internal/**/*_test.go`) test our own code — run with `go test ./...`.
   - *Task tests* are the oracles the loop copies into a temp module and runs against candidate
-    code. They are **not** part of `go test ./...`. In `authored` mode they live at
-    `tasks/*/solution_test.go`; in `generated` mode they exist only in memory for the life of
-    the run and are returned on the `Run` for display. Neither is ever written by the coder.
-- **Task auto-discovery:** each subdirectory of `tasks/` is one task. A `spec.md` is required
-  and pins the signature. A `solution_test.go` is **optional**, and its presence is what selects
-  the mode: present → `OracleAuthored`, absent → `OracleGenerated`. Dropping in a new folder is
-  enough — no registration step.
+    code. They are **not** part of `go test ./...`. Today the fixed authored oracle is embedded
+    in `cmd/repair/main.go`. Once F6 lands, authored task files will live at
+    `tasks/*/solution_test.go`; generated ones will exist only in memory for the life of a run.
+    Neither is ever written by the coder.
+- **Task auto-discovery (F6 planned):** each subdirectory of `tasks/` will be one task. A
+  `spec.md` will be required and pin the signature. A `solution_test.go` will be optional, with
+  its presence selecting `OracleAuthored`; its absence selecting `OracleGenerated`.
 - **The oracle is frozen per run.** Generated test files are never written back into `tasks/`.
   Promoting a generated oracle to an authored one is a deliberate human act — read it, decide it
   is right, commit it — never something the loop does on its own.

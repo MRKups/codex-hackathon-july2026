@@ -1,0 +1,820 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Repair Loop</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #1f2937;
+        background: #f7f7f6;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      main {
+        width: min(1500px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 24px 0 40px;
+      }
+
+      header.page-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 24px;
+        padding-bottom: 20px;
+        border-bottom: 1px solid #d1d5db;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        margin-bottom: 4px;
+        font-size: 1.4rem;
+        font-weight: 650;
+      }
+
+      h2 {
+        margin-bottom: 12px;
+        font-size: 1rem;
+        font-weight: 650;
+      }
+
+      h3 {
+        margin-bottom: 0;
+        font-size: 0.9rem;
+        font-weight: 650;
+      }
+
+      .muted {
+        margin-bottom: 0;
+        color: #667085;
+        font-size: 0.9rem;
+        line-height: 1.5;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
+      button,
+      select {
+        font: inherit;
+      }
+
+      button {
+        padding: 8px 12px;
+        color: #1f2937;
+        font-weight: 600;
+        border: 1px solid #9ca3af;
+        border-radius: 4px;
+        background: #fff;
+        cursor: pointer;
+      }
+
+      button:hover:not(:disabled) {
+        background: #f3f4f6;
+      }
+
+      button.primary {
+        color: #fff;
+        border-color: #1f2937;
+        background: #1f2937;
+      }
+
+      button.primary:hover:not(:disabled) {
+        background: #111827;
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: 0.6;
+      }
+
+      #downloadButton[hidden] {
+        display: none;
+      }
+
+      .run-line {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 16px 0;
+        color: #667085;
+        font-size: 0.9rem;
+      }
+
+      .run-status {
+        display: inline-block;
+        padding: 3px 7px;
+        color: #475467;
+        font-size: 0.75rem;
+        font-weight: 650;
+        border: 1px solid #98a2b3;
+        border-radius: 4px;
+        background: #fff;
+      }
+
+      .run-status.passed {
+        color: #166534;
+        border-color: #86efac;
+        background: #f0fdf4;
+      }
+
+      .run-status.gaveup {
+        color: #991b1b;
+        border-color: #fca5a5;
+        background: #fef2f2;
+      }
+
+      .run-status.infrastructurefailed,
+      .run-status.oraclefailed {
+        color: #92400e;
+        border-color: #fcd34d;
+        background: #fffbeb;
+      }
+
+      .context,
+      .comparison {
+        display: grid;
+        gap: 16px;
+      }
+
+      .context {
+        grid-template-columns: 1fr 1fr;
+        margin-bottom: 24px;
+      }
+
+      .comparison {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 1fr);
+      }
+
+      .panel,
+      .pane {
+        min-width: 0;
+        border: 1px solid #d1d5db;
+        border-radius: 4px;
+        background: #fff;
+      }
+
+      .panel {
+        padding: 16px;
+      }
+
+      .panel-header,
+      .pane-header,
+      .comparison-header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .panel-header {
+        margin-bottom: 12px;
+      }
+
+      .label,
+      .attempt-state {
+        color: #667085;
+        font-size: 0.75rem;
+        font-weight: 650;
+      }
+
+      .label {
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      .spec {
+        min-height: 105px;
+        margin-bottom: 0;
+        line-height: 1.55;
+        white-space: pre-wrap;
+      }
+
+      .signature {
+        display: block;
+        margin-top: 14px;
+        padding: 9px;
+        overflow: auto;
+        color: #1e3a5f;
+        border-left: 3px solid #94a3b8;
+        background: #f8fafc;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.82rem;
+        white-space: pre;
+      }
+
+      .oracle-note,
+      .pane-note {
+        margin-bottom: 10px;
+        color: #667085;
+        font-size: 0.82rem;
+        line-height: 1.45;
+      }
+
+      .comparison-section {
+        padding-top: 20px;
+        border-top: 1px solid #d1d5db;
+      }
+
+      .comparison-header {
+        margin-bottom: 12px;
+      }
+
+      .controls {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 14px;
+        color: #475467;
+        font-size: 0.85rem;
+      }
+
+      .controls[hidden] {
+        display: none;
+      }
+
+      select {
+        max-width: 190px;
+        padding: 6px 8px;
+        color: #1f2937;
+        border: 1px solid #9ca3af;
+        border-radius: 4px;
+        background: #fff;
+      }
+
+      .pane {
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      .panel pre {
+        min-height: 200px;
+        max-height: 280px;
+      }
+
+      .pane[data-tone="failed"] {
+        border-top: 3px solid #dc2626;
+      }
+
+      .pane[data-tone="passed"] {
+        border-top: 3px solid #16a34a;
+      }
+
+      .pane[data-tone="feedback"] {
+        border-top: 3px solid #a16207;
+      }
+
+      .pane-header {
+        padding: 12px 14px;
+        border-bottom: 1px solid #e5e7eb;
+      }
+
+      .pane-note {
+        min-height: 52px;
+        margin: 0;
+        padding: 12px 14px 0;
+      }
+
+      .attempt-state.failed {
+        color: #b91c1c;
+      }
+
+      .attempt-state.passed {
+        color: #15803d;
+      }
+
+      pre {
+        flex: 1;
+        min-height: 300px;
+        max-height: 570px;
+        margin: 12px;
+        padding: 12px;
+        overflow: auto;
+        color: #1f2937;
+        border: 1px solid #e5e7eb;
+        background: #fafafa;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.8rem;
+        line-height: 1.55;
+        white-space: pre;
+      }
+
+      #feedbackCode {
+        color: #713f12;
+        background: #fffbeb;
+      }
+
+      .notice {
+        min-height: 1.3em;
+        margin: 14px 0 0;
+        color: #667085;
+        font-size: 0.85rem;
+        line-height: 1.45;
+      }
+
+      @media (max-width: 980px) {
+        .comparison {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 720px) {
+        main {
+          width: min(100% - 20px, 1500px);
+          padding-top: 16px;
+        }
+
+        header.page-header,
+        .context,
+        .comparison-header {
+          display: grid;
+          grid-template-columns: 1fr;
+        }
+
+        .actions {
+          justify-content: flex-start;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="page-header">
+        <div>
+          <h1>Repair Loop</h1>
+          <p class="muted">A Go candidate is checked against one frozen authored oracle. Failed verifier feedback becomes the next repair input.</p>
+        </div>
+        <div class="actions">
+          <button id="downloadButton" type="button" hidden>Download run JSON</button>
+          <button class="primary" id="runButton" type="button">Run live repair</button>
+        </div>
+      </header>
+
+      <div class="run-line">
+        <span class="run-status" id="runStatus">Ready</span>
+        <span id="runSummary">The fixed task and oracle load without contacting the provider.</span>
+      </div>
+
+      <section class="context" aria-label="Task context">
+        <article class="panel">
+          <div class="panel-header">
+            <h2>Task specification</h2>
+            <span class="label">Coder input</span>
+          </div>
+          <p class="spec" id="specText">Loading fixed task…</p>
+          <code class="signature" id="signatureText">Loading signature…</code>
+        </article>
+
+        <article class="panel">
+          <div class="panel-header">
+            <h2>Frozen authored oracle</h2>
+            <span class="label" id="oracleLabel">Never sent to coder</span>
+          </div>
+          <p class="oracle-note">This test source stays fixed for the entire run. The coder sees verifier feedback, never this file.</p>
+          <pre id="oracleCode">Loading frozen oracle…</pre>
+        </article>
+      </section>
+
+      <section class="comparison-section" aria-labelledby="comparisonTitle">
+        <div class="comparison-header">
+          <div>
+            <h2 id="comparisonTitle">Candidate comparison</h2>
+            <p class="muted">Compare the source that was checked with a later candidate under the same oracle.</p>
+          </div>
+        </div>
+
+        <div class="controls" id="controls" hidden>
+          <span>Compare</span>
+          <select id="leftSelect" aria-label="Left attempt"></select>
+          <span>with</span>
+          <select id="rightSelect" aria-label="Right attempt"></select>
+        </div>
+
+        <div class="comparison">
+          <article class="pane" id="leftPane">
+            <div class="pane-header">
+              <h3 id="leftTitle">Candidate source</h3>
+              <span class="attempt-state" id="leftState"></span>
+            </div>
+            <p class="pane-note" id="leftNote">Start a run to show the source sent to Go.</p>
+            <pre id="leftCode">No candidate yet.</pre>
+          </article>
+
+          <article class="pane" data-tone="feedback">
+            <div class="pane-header">
+              <h3 id="feedbackTitle">Verifier feedback</h3>
+              <span class="attempt-state" id="feedbackState"></span>
+            </div>
+            <p class="pane-note" id="feedbackNote">Compiler or test output will appear here after a failed verification.</p>
+            <pre id="feedbackCode">No verifier output yet.</pre>
+          </article>
+
+          <article class="pane" id="rightPane">
+            <div class="pane-header">
+              <h3 id="rightTitle">Later candidate</h3>
+              <span class="attempt-state" id="rightState"></span>
+            </div>
+            <p class="pane-note" id="rightNote">A later verified candidate will appear here when one exists.</p>
+            <pre id="rightCode">No later candidate yet.</pre>
+          </article>
+        </div>
+
+        <p class="notice" id="notice">No provider request has been made.</p>
+      </section>
+    </main>
+
+    <script>
+      (function () {
+        "use strict";
+
+        var state = {
+          leftAttempt: null,
+          pollTimer: null,
+          rightAttempt: null,
+          run: null,
+          runID: null
+        };
+
+        var runButton = document.getElementById("runButton");
+        var downloadButton = document.getElementById("downloadButton");
+        var runStatus = document.getElementById("runStatus");
+        var runSummary = document.getElementById("runSummary");
+        var specText = document.getElementById("specText");
+        var signatureText = document.getElementById("signatureText");
+        var oracleLabel = document.getElementById("oracleLabel");
+        var oracleCode = document.getElementById("oracleCode");
+        var controls = document.getElementById("controls");
+        var leftSelect = document.getElementById("leftSelect");
+        var rightSelect = document.getElementById("rightSelect");
+        var notice = document.getElementById("notice");
+
+        var panes = {
+          feedback: {
+            code: document.getElementById("feedbackCode"),
+            note: document.getElementById("feedbackNote"),
+            state: document.getElementById("feedbackState"),
+            title: document.getElementById("feedbackTitle")
+          },
+          left: {
+            code: document.getElementById("leftCode"),
+            note: document.getElementById("leftNote"),
+            root: document.getElementById("leftPane"),
+            state: document.getElementById("leftState"),
+            title: document.getElementById("leftTitle")
+          },
+          right: {
+            code: document.getElementById("rightCode"),
+            note: document.getElementById("rightNote"),
+            root: document.getElementById("rightPane"),
+            state: document.getElementById("rightState"),
+            title: document.getElementById("rightTitle")
+          }
+        };
+
+        runButton.addEventListener("click", startRun);
+        downloadButton.addEventListener("click", downloadRun);
+        leftSelect.addEventListener("change", function () {
+          state.leftAttempt = Number(leftSelect.value);
+          renderComparison();
+        });
+        rightSelect.addEventListener("change", function () {
+          state.rightAttempt = Number(rightSelect.value);
+          renderComparison();
+        });
+
+        loadTask();
+
+        function loadTask() {
+          fetch("/task", {
+            headers: { "Accept": "application/json" },
+            cache: "no-store"
+          })
+            .then(readJSON)
+            .then(renderTask)
+            .catch(function () {
+              specText.textContent = "The fixed task could not be loaded.";
+              signatureText.textContent = "No signature available.";
+              oracleCode.textContent = "No oracle available.";
+            });
+        }
+
+        function startRun() {
+          stopPolling();
+          state.leftAttempt = null;
+          state.rightAttempt = null;
+          state.run = null;
+          state.runID = null;
+          downloadButton.hidden = true;
+          runButton.disabled = true;
+          runButton.textContent = "Starting…";
+          setRunStatus("Starting", "running");
+          runSummary.textContent = "Starting a provider run.";
+          notice.textContent = "Waiting for the first verified candidate.";
+          renderComparison();
+
+          fetch("/run", {
+            method: "POST",
+            headers: { "Accept": "application/json" },
+            cache: "no-store"
+          })
+            .then(readJSON)
+            .then(function (started) {
+              state.runID = started.id;
+              setRunStatus("Running", "running");
+              runSummary.textContent = "The provider run is active. Attempts appear only after Go verifies them.";
+              pollRun();
+            })
+            .catch(showStartError);
+        }
+
+        function pollRun() {
+          if (!state.runID) {
+            return;
+          }
+
+          fetch("/run/" + encodeURIComponent(state.runID), {
+            headers: { "Accept": "application/json" },
+            cache: "no-store"
+          })
+            .then(readJSON)
+            .then(function (run) {
+              state.run = run;
+              renderRun();
+              if (run.status === "running") {
+                state.pollTimer = window.setTimeout(pollRun, 500);
+                return;
+              }
+              stopPolling();
+              runButton.disabled = false;
+              runButton.textContent = "Run another repair";
+              downloadButton.hidden = false;
+            })
+            .catch(showPollError);
+        }
+
+        function readJSON(response) {
+          if (!response.ok) {
+            return response.json().catch(function () {
+              return {};
+            }).then(function (body) {
+              throw new Error(body.error || "Request failed with status " + response.status);
+            });
+          }
+          return response.json();
+        }
+
+        function stopPolling() {
+          if (state.pollTimer !== null) {
+            window.clearTimeout(state.pollTimer);
+            state.pollTimer = null;
+          }
+        }
+
+        function showStartError(error) {
+          stopPolling();
+          runButton.disabled = false;
+          runButton.textContent = "Try again";
+          setRunStatus("Start failed", "infrastructurefailed");
+          runSummary.textContent = error.message || "The run could not be started.";
+          notice.textContent = "No candidate was created.";
+        }
+
+        function showPollError(error) {
+          stopPolling();
+          runButton.disabled = false;
+          runButton.textContent = "Start another repair";
+          setRunStatus("Connection interrupted", "");
+          runSummary.textContent = "The browser lost contact with the local server; the server-side run may still be active.";
+          notice.textContent = error.message || "The latest run state could not be retrieved.";
+        }
+
+        function renderTask(task) {
+          specText.textContent = task.spec || "No task specification was recorded.";
+          signatureText.textContent = task.signature || "No signature was recorded.";
+          oracleLabel.textContent = String(task.oracle || "authored").toUpperCase() + " • FROZEN";
+          oracleCode.textContent = task.testCode || "No oracle source was recorded.";
+        }
+
+        function renderRun() {
+          var run = state.run;
+          if (!run) {
+            return;
+          }
+
+          renderTask(run);
+          setRunStatus(statusLabel(run.status), run.status);
+          if (run.status === "running") {
+            runSummary.textContent = "Attempt " + (run.attempts.length + 1) + " is in progress.";
+            notice.textContent = run.attempts.length === 0
+              ? "Waiting for the first verified candidate."
+              : "Waiting for the next verified candidate.";
+          } else if (run.status === "passed") {
+            runSummary.textContent = "A candidate passed both go build and go test against the frozen oracle.";
+            notice.textContent = "The run finished successfully.";
+          } else if (run.status === "gaveup") {
+            runSummary.textContent = "The attempt budget ended without a passing candidate.";
+            notice.textContent = "The visible verifier feedback came from the same frozen oracle.";
+          } else {
+            runSummary.textContent = run.error || "The run ended without a code verdict.";
+            notice.textContent = "This is an infrastructure outcome, not a candidate verdict.";
+          }
+          renderComparison();
+        }
+
+        function renderComparison() {
+          var run = state.run;
+          if (!run) {
+            controls.hidden = true;
+            clearAttemptPane(panes.left, "Candidate source", "Start a run to show the source sent to Go.", "No candidate yet.");
+            renderFeedback(null, null);
+            clearAttemptPane(panes.right, "Later candidate", "A later candidate appears here when one exists.", "No later candidate yet.");
+            return;
+          }
+
+          var attempts = Array.isArray(run.attempts) ? run.attempts : [];
+          if (attempts.length === 0) {
+            controls.hidden = true;
+            clearAttemptPane(panes.left, "Candidate source", "No verified candidate has been recorded yet.", "Waiting for Go verification.");
+            renderFeedback(null, null);
+            clearAttemptPane(panes.right, "Later candidate", "No later candidate has been recorded yet.", "Waiting for Go verification.");
+            return;
+          }
+
+          var pair = selectAttempts(attempts);
+          renderAttemptControls(attempts, pair.left, pair.right);
+          renderAttemptPane(panes.left, pair.left, "Candidate source");
+          renderFeedback(pair.left, pair.right);
+          if (pair.right) {
+            renderAttemptPane(panes.right, pair.right, "Later candidate");
+          } else {
+            clearAttemptPane(panes.right, "Later candidate", "No later candidate was needed or recorded.", "No later candidate.");
+          }
+        }
+
+        function selectAttempts(attempts) {
+          var fallbackLeft = firstRejected(attempts) || attempts[0];
+          var fallbackRight = attempts[attempts.length - 1];
+          var left = findAttempt(attempts, state.leftAttempt) || fallbackLeft;
+          var right = findAttempt(attempts, state.rightAttempt) || fallbackRight;
+
+          if (left.n === right.n) {
+            if (attempts.length > 1) {
+              right = attempts[attempts.length - 1].n === left.n ? attempts[0] : attempts[attempts.length - 1];
+            } else {
+              right = null;
+            }
+          }
+
+          state.leftAttempt = left.n;
+          state.rightAttempt = right ? right.n : null;
+          return { left: left, right: right };
+        }
+
+        function renderAttemptControls(attempts, left, right) {
+          controls.hidden = attempts.length < 2;
+          if (attempts.length < 2) {
+            return;
+          }
+          fillSelect(leftSelect, attempts, left.n);
+          fillSelect(rightSelect, attempts, right.n);
+        }
+
+        function fillSelect(select, attempts, selected) {
+          select.replaceChildren();
+          attempts.forEach(function (attempt) {
+            var option = document.createElement("option");
+            option.value = String(attempt.n);
+            option.selected = attempt.n === selected;
+            option.textContent = attemptLabel(attempt);
+            select.append(option);
+          });
+        }
+
+        function renderAttemptPane(pane, attempt, title) {
+          pane.root.dataset.tone = attempt.passed ? "passed" : "failed";
+          pane.title.textContent = title + " — attempt " + attempt.n;
+          pane.state.textContent = attempt.passed ? "Passed" : "Rejected";
+          pane.state.className = "attempt-state " + (attempt.passed ? "passed" : "failed");
+          pane.note.textContent = attempt.passed
+            ? "This candidate passed both go build and go test."
+            : "This candidate was rejected by the Go verifier.";
+          pane.code.textContent = attempt.code || "(empty candidate source)";
+        }
+
+        function clearAttemptPane(pane, title, note, code) {
+          pane.root.dataset.tone = "";
+          pane.title.textContent = title;
+          pane.state.textContent = "";
+          pane.state.className = "attempt-state";
+          pane.note.textContent = note;
+          pane.code.textContent = code;
+        }
+
+        function renderFeedback(left, right) {
+          if (!left) {
+            panes.feedback.title.textContent = "Verifier feedback";
+            panes.feedback.state.textContent = "";
+            panes.feedback.note.textContent = "Compiler or test output appears here after a failed verification.";
+            panes.feedback.code.textContent = "No verifier output yet.";
+            return;
+          }
+
+          panes.feedback.title.textContent = "Verifier feedback — attempt " + left.n;
+          if (left.passed) {
+            panes.feedback.state.textContent = "Accepted";
+            panes.feedback.note.textContent = "The run record indicates both Go verification stages passed.";
+            panes.feedback.code.textContent = "go build passed\ngo test passed";
+            return;
+          }
+
+          panes.feedback.state.textContent = "Rejected";
+          panes.feedback.note.textContent = right && right.n === left.n + 1
+            ? "This source and feedback were included in attempt " + right.n + "."
+            : "The immediate next repair prompt received this source and feedback.";
+          panes.feedback.code.textContent = left.output || "No verifier output was recorded.";
+        }
+
+        function firstRejected(attempts) {
+          for (var index = 0; index < attempts.length; index += 1) {
+            if (!attempts[index].passed) {
+              return attempts[index];
+            }
+          }
+          return null;
+        }
+
+        function findAttempt(attempts, number) {
+          if (!number) {
+            return null;
+          }
+          for (var index = 0; index < attempts.length; index += 1) {
+            if (attempts[index].n === number) {
+              return attempts[index];
+            }
+          }
+          return null;
+        }
+
+        function attemptLabel(attempt) {
+          return "Attempt " + attempt.n + " — " + (attempt.passed ? "passed" : "rejected");
+        }
+
+        function setRunStatus(text, status) {
+          runStatus.textContent = text;
+          runStatus.className = "run-status";
+          if (status) {
+            runStatus.classList.add(status);
+          }
+        }
+
+        function statusLabel(status) {
+          var labels = {
+            running: "Running",
+            passed: "Passed",
+            gaveup: "Gave up",
+            infrastructurefailed: "Infrastructure failure",
+            oraclefailed: "Oracle failure"
+          };
+          return labels[status] || "Unknown state";
+        }
+
+        function downloadRun() {
+          if (!state.run) {
+            return;
+          }
+          var blob = new Blob([JSON.stringify(state.run, null, 2)], { type: "application/json" });
+          var url = URL.createObjectURL(blob);
+          var link = document.createElement("a");
+          link.href = url;
+          link.download = (state.run.id || "repair-run") + ".json";
+          document.body.append(link);
+          link.click();
+          link.remove();
+          URL.revokeObjectURL(url);
+        }
+      }());
+    </script>
+  </body>
+</html>

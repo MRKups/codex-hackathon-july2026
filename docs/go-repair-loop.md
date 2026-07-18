@@ -6,8 +6,9 @@ context that writes tests from the spec and signature alone. The Go toolchain ru
 oracle together; on failure the first verifier error is fed back and the coder tries again,
 until the tests pass or attempts run out.
 
-No sandbox, no additional infrastructure services, no Python/JS. The configured LLM is the
-only external HTTP dependency; the Go toolchain *is* the verifier:
+No sandbox and no additional infrastructure services. The configured LLM is the only external
+HTTP dependency; the browser is a single embedded HTML/vanilla-JS page with no framework or
+build chain. The Go toolchain *is* the verifier:
 
 - `go build` (the compiler) rejects most bad output for free, before anything runs — **checker #1**.
 - `go test` runs the oracle — **checker #2**.
@@ -54,14 +55,15 @@ keep saying so.
 
 1. Take a **task**: a natural-language spec + a pinned signature (+ an authored test file, in
    `authored` mode).
-2. **Build the oracle, once.** In `authored` mode, read it from the task. In `generated` mode,
-   ask the test-writer context for a `package solution` test file from spec + signature only.
-   Check it compiles (see Oracle preflight). Freeze it.
+2. **Build and freeze one accepted oracle.** In `authored` mode, read it from the task. In
+   `generated` mode, ask the test-writer context for a `package solution` test file from spec +
+   signature only. If preflight rejects a generated candidate, retry only before any coder call;
+   once accepted, freeze it.
 3. Ask the coder for a complete `package solution` source file that satisfies the spec.
 4. Write it to a throwaway temp dir, next to the frozen oracle.
 5. Run `go build ./...`, then `go test ./...` only when the build succeeds, under one verifier timeout.
 6. **Pass** → done. **Fail** → capture the first failed command's output, feed it back into the next coder prompt, return to step 3.
-7. Give up after N attempts, and record *how* it failed (see Failure mode signal).
+7. Give up after N attempts. F18 may later record an optional failure-mode signal.
 
 It only moves forward, but each attempt can see the previous attempt's code and its
 error — that feedback is the whole point. The oracle does not move at all.
@@ -74,15 +76,12 @@ A generated oracle can fail to compile — wrong helper name, an import it never
 that doesn't match the signature. That is a **test-writer** fault, and blaming the coder for
 it would poison every measurement in the project.
 
-Primary rule, cheap and stdlib-only: attribute build errors by file. If `go build` fails and
-every reported error position is in `solution_test.go`, it is an oracle fault; regenerate the
-oracle (up to a small injected cap) and restart the run. If any error is in `solution.go`, it
-is an ordinary failed attempt. A run that cannot produce a compiling oracle within the cap
-ends as `oraclefailed` — a run-level outcome, never a coder failure and never a green.
-
-Stretch (F16): synthesize a signature-derived stub with `go/parser` and compile the oracle
-against it *before* the first coder call, so an unusable oracle is caught without spending a
-generation. The stub is only ever built, never run.
+`go build` ignores `*_test.go`, so it cannot preflight a generated oracle. F16 instead creates
+a signature-derived stub and runs `go test -c` with the generated `solution_test.go` before the
+first coder call. That compiles the test without running it; a failure is an oracle fault, so the
+test-writer may retry up to an injected cap. A run that cannot produce an accepted oracle ends as
+`oraclefailed` — a run-level outcome, never a coder failure and never a green. Use `go/parser` if
+needed to derive the stub safely from the pinned signature.
 
 ## Failure mode signal
 
@@ -102,44 +101,37 @@ aid for explaining a give-up, not a prerequisite for the hackathon demo.
 
 ## Data shapes
 
+### Current Phase 0 types (C3/F4)
+
 `Task` and `Attempt` live in the dependency-free `internal/domain` package:
 
 ```go
 package domain
 
-// OracleMode says who wrote the tests. It never changes during a run.
-type OracleMode string
-
-const (
-	OracleAuthored  OracleMode = "authored"  // a human wrote TestCode ahead of time
-	OracleGenerated OracleMode = "generated" // a separate LLM context writes it from Spec
-)
-
-// A single unit of work. The spec is the human's; the code is the coder's; the oracle is
-// either the human's or the test-writer's — never the coder's.
+// A single authored-oracle unit of work for Phase 0.
 type Task struct {
-	Name      string     // identifier, used for logging
-	Spec      string     // natural-language description of the desired behaviour
-	Signature string     // e.g. "func Solve(in []int) (int, error)" — pin the API so tests compile
-	Oracle    OracleMode // which mode this task runs in
-	TestCode  string     // solution_test.go. Required when Oracle == OracleAuthored;
-	                     // must be empty when OracleGenerated — the loop fills it once, up front.
+	Name      string // identifier, used for logging
+	Spec      string // natural-language description of the desired behaviour
+	Signature string // e.g. "func Solve(in []int) (int, error)" — pin the API so tests compile
+	TestCode  string // fixed human-authored solution_test.go
 }
 
 // The result of one pass through the loop.
 type Attempt struct {
-	N      int    // attempt number, starting at 1
-	Code   string // the generated solution.go
-	Passed bool   // whether both verifier stages passed
-	Output string // empty on success; otherwise failed-stage output or a stable timeout note
+	N      int    `json:"n"`      // attempt number, starting at 1
+	Code   string `json:"code"`   // the generated solution.go
+	Passed bool   `json:"passed"` // whether both verifier stages passed
+	Output string `json:"output"` // empty on success; otherwise failed-stage output or a stable timeout note
 }
 ```
 
-`Task.TestCode` is verifier input in both modes and **must never enter a coder prompt** in
-either. In `generated` mode the loop resolves the oracle before attempt 1 and holds it
-alongside the task for the rest of the run; the resolved oracle is what the UI displays.
+In F4, `Task.TestCode` is the fixed authored oracle and **must never enter a coder prompt**.
 
-`Run` remains a future `internal/run` type; F7, not C3, freezes its JSON shape:
+### F15 oracle-mode extension (planned)
+
+F15 adds `OracleMode` (`authored` / `generated`) and `Task.Oracle`. In generated mode the loop
+will resolve and freeze `TestCode` before attempt 1. F7 has already frozen the `Run` JSON shape
+below, including fields reserved for that later extension:
 
 ```go
 package run
@@ -152,24 +144,49 @@ type Run struct {
 	ID          string           `json:"id"`
 	Task        string           `json:"task"`        // task name, for the UI header
 	Spec        string           `json:"spec"`        // shown so the audience sees what's being solved
+	Signature   string           `json:"signature"`   // pinned API, shown with the spec
 	Oracle      string           `json:"oracle"`      // "authored" | "generated"
 	TestCode    string           `json:"testCode"`    // the frozen oracle, shown beside the spec
-	Status      string           `json:"status"`      // "running" | "passed" | "gaveup" | "oraclefailed"
+	MaxAttempts int              `json:"maxAttempts"` // injected budget for this run
+	Status      Status           `json:"status"`      // running | passed | gaveup | infrastructurefailed | oraclefailed
 	FailureMode string           `json:"failureMode"` // "" | "varied" | "persistent" — set when gaveup
+	Error       string           `json:"error"`       // terminal infrastructure/oracle failure only
 	Attempts    []domain.Attempt `json:"attempts"`    // appended to live, as each attempt finishes
 }
 ```
 
-`TestCode` is on the `Run` deliberately: in `generated` mode the oracle is a *result* of the
-run, not an input to it, and showing it next to the spec is what makes the demo legible —
-the audience can read the spec, read the tests something else derived from that spec, and
-watch the coder try to satisfy them.
+`TestCode` is on the `Run` deliberately: in generated mode the oracle will be a *result* of the
+run, not an input to it. Today every run sets `Oracle` to `"authored"` and exposes the fixed
+human-authored test source. Either way, showing the frozen source beside the spec makes the
+demonstration legible without ever passing it to the coder.
 
 ---
 
-## Skeleton
+## F4 repair contract
 
-The whole thing is ~four functions. TODOs mark where to fill in.
+The implemented Phase 0 loop is authored-oracle and coder-only:
+
+```go
+type AttemptReporter func(domain.Attempt) error
+
+func Repair(
+	ctx context.Context,
+	coder llm.LLM,
+	task domain.Task,
+	maxAttempts int,
+	testTimeout time.Duration,
+	report AttemptReporter,
+) (domain.Attempt, error)
+```
+
+It validates inputs before contacting the provider, reports each completed verification
+synchronously, returns a passed attempt immediately, and returns the final failed attempt with
+nil error when the budget is exhausted.
+
+## F15 target skeleton (planned)
+
+The following pseudocode deliberately describes the later two-role extension. It is not the F4
+API and must not be implemented until F15 adds `OracleMode`, `TestPrompt`, and oracle resolution.
 
 ```go
 package repair
@@ -195,9 +212,9 @@ type AttemptReporter func(domain.Attempt) error
 // Its attempt cap and test timeout are injected by the caller. It returns the final
 // attempt (passed or not) and only errors on caller or infrastructure failures.
 //
-// coder and tester are separate llm.LLM values (in practice, different models). tester is
-// called at most once — during oracle resolution, before the loop — and never afterwards.
-// In OracleAuthored mode tester is unused and may be nil.
+// coder and tester are separate llm.LLM values (in practice, different models). Oracle
+// resolution may request candidate oracles only before the first coder call, then freezes one
+// accepted result for the rest of the run. In OracleAuthored mode tester is unused and may be nil.
 func Repair(ctx context.Context, coder, tester llm.LLM, task domain.Task, maxAttempts int, testTimeout time.Duration, report AttemptReporter) (domain.Attempt, error) {
 	if maxAttempts <= 0 {
 		return domain.Attempt{}, errors.New("max attempts must be greater than zero")
@@ -206,9 +223,10 @@ func Repair(ctx context.Context, coder, tester llm.LLM, task domain.Task, maxAtt
 		return domain.Attempt{}, errors.New("verifier timeout must be greater than zero")
 	}
 
-	// Resolve the oracle ONCE, up front, and freeze it. In OracleAuthored mode this just
-	// validates task.TestCode is present. In OracleGenerated mode it calls tester with spec
-	// + signature only, and never again — nothing below this line may regenerate it.
+	// Resolve and freeze one accepted oracle up front. In OracleAuthored mode this just validates
+	// task.TestCode is present. In OracleGenerated mode it calls tester with spec + signature
+	// only; F16 may retry rejected candidates here, but nothing below may regenerate the accepted
+	// oracle.
 	task, err := resolveOracle(ctx, tester, task)
 	if err != nil {
 		return domain.Attempt{}, err // includes the oraclefailed outcome
@@ -324,10 +342,10 @@ func write(dir, name, content string) error {
 //
 // OracleAuthored: validate task.TestCode is non-empty; tester is not called.
 // OracleGenerated: call tester with prompt.TestPrompt(spec, signature) — spec and signature
-// and nothing else — extract, and preflight it. On a non-compiling oracle, retry up to the
-// injected oracle cap; on exhaustion return the oraclefailed error. The candidate solution
-// does not exist yet at this point in the program, which is what makes the guarantee
-// structural rather than a matter of discipline.
+// and nothing else — extract, and preflight it. F16 may retry rejected candidates up to the
+// injected oracle cap before any coder call; once one is accepted it is frozen. On exhaustion
+// return the oraclefailed error. The candidate solution does not exist yet at this point in the
+// program, which is what makes the guarantee structural rather than a matter of discipline.
 func resolveOracle(ctx context.Context, tester llm.LLM, task domain.Task) (domain.Task, error) {
 	// TODO(F15)
 	return task, nil
@@ -360,8 +378,9 @@ guarantee is void — stop and flag it rather than widening a signature.**
 
 ## Failure contract
 
-`Repair` validates `maxAttempts > 0` and a positive verifier timeout before it contacts the
-provider. After that, each event has one classification:
+In F4, `Repair` validates a non-nil coder, `maxAttempts > 0`, a positive verifier timeout, and a
+non-empty authored `Task.TestCode` before it contacts the provider. After that, each event has
+one classification:
 
 | Event | Result |
 |---|---|
@@ -372,9 +391,9 @@ provider. After that, each event has one classification:
 | Derived verifier timeout while the caller context remains live | Failed attempt with `verifier timeout — generated code may have hung` and nil infrastructure error. |
 | Caller cancellation or deadline | Return `ctx.Err()`; never relabel it as a verifier timeout. |
 | Temp-dir, write, cleanup, process-launch, or attempt-reporter failure | Infrastructure/caller error. Cleanup errors must not be silently swallowed. |
-| Oracle generation returns unusable or non-compiling test source | Regenerate the oracle up to the injected oracle cap. Exhausting that cap ends the run `oraclefailed` with an error; it is never a coder failure and never a pass. |
-| `go build` fails with every error position inside `solution_test.go` | Oracle fault, not a failed attempt. Regenerate the oracle per the row above. |
-| Attempt budget exhausted | Return the final failed attempt and nil error, with `FailureMode` set to `varied` or `persistent`. |
+| Oracle preflight rejects generated test source *(F15/F16)* | Before any coder call, regenerate a candidate oracle up to the injected cap. Exhausting that cap ends the run `oraclefailed` with an error; it is never a coder failure and never a pass. |
+| `go test -c` fails against the signature-derived stub *(F16)* | Oracle fault, not a failed attempt. Regenerate the oracle per the row above. |
+| Attempt budget exhausted | Return the final failed attempt and nil error. F18 later sets `Run.FailureMode` to `varied` or `persistent`. |
 
 `Attempt.Output` is empty on a passing attempt. The optional synchronous `AttemptReporter` is
 called after every completed verification so the terminal CLI can print real-time progress and
@@ -391,31 +410,32 @@ candidate source, which keeps fakes and future providers unambiguous.
 
 Break it into small Go packages, each with one job. Nothing points back up the list.
 
-- **`domain/`** — dependency-free owner of `Task`, `Attempt`, and `OracleMode`. `Task.TestCode`
-  is verifier input in both modes and never enters a coder prompt.
-- **`llm/`** — talks to the model. One interface (`LLM`), one concrete client (OpenAI-compatible chat completions). Owns the HTTP call and reads `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, and `LLM_TIMEOUT` from env. It applies a per-call timeout + one retry. Nothing else in the system knows or cares which provider you use. **Two `LLM` values are constructed — a coder and a test-writer — differing only in model name.** The interface is unchanged; role separation lives in the caller, not in this package.
-- **`prompt/`** — pure string work: `FirstPrompt`, `RepairPrompt`, `TestPrompt`, and
-  `ExtractGoCode`. It imports no project package; repair supplies only spec, signature,
+- **`domain/`** — dependency-free owner of `Task` and `Attempt` in F4. F15 adds `OracleMode`.
+  `Task.TestCode` is verifier input and never enters a coder prompt.
+- **`llm/`** — talks to the model. One interface (`LLM`), one concrete client (OpenAI-compatible
+  chat completions). Owns the HTTP call and reads `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, and
+  `LLM_TIMEOUT` from env. It applies a per-call timeout + one retry. F4 constructs one coder;
+  F15/F17 later construct separate coder and test-writer values at the composition root.
+- **`prompt/`** — F4 pure string work: `FirstPrompt`, `RepairPrompt`, and `ExtractGoCode`.
+  F15 adds `TestPrompt`. It imports no project package; repair supplies only spec, signature,
   candidate code, and verifier output. This is where loop quality lives, so keep it isolated.
-- **`repair/`** — the loop itself (`Repair`, `resolveOracle`, `runTests`). Depends on `domain`,
-  `llm`, and `prompt`. Owns oracle resolution + preflight, the temp-dir verifier (`go build`,
-  then `go test`), and retry logic. The heart; everything else is scaffolding around it.
-  `Repair` takes **two** `llm.LLM` values — coder and test-writer — and the test-writer is
-  called exactly once, before the attempt loop begins.
+- **`repair/`** — F4 owns the coder-only loop (`Repair`, `generate`, `runTests`). It depends on
+  `domain`, `llm`, and `prompt`, and owns temp-dir verification (`go build`, then `go test`) and
+  retry logic. F15 later adds oracle resolution and the test-writer before the attempt loop.
 - **`task/`** — F6 loader for task files. It returns `domain.Task`; it does not own the type.
   A task directory with no `solution_test.go` loads as `OracleGenerated`; one with a test file
   loads as `OracleAuthored`.
-- **`run/`** — orchestration + state. Kicks off a `Repair` in a goroutine, appends attempts to a `Run` as they land, answers "status of run X." In-memory (a `map[string]*Run` + a mutex) for v1. This is the bridge between the pure loop and the web.
-- **`server/`** — HTTP. Two handlers (start a run, poll a run) plus serving the UI. Thin.
-- **`web/`** — the frontend. **One HTML file, vanilla JS, baked into the binary with `embed`.** No npm, no build step.
+- **`run/`** — orchestration + state. Kicks off a `Repair` in a goroutine, appends attempts to a `Run` as they land, answers "status of run X." In-memory (a `map[string]*Run` + a mutex) for v1. This is the bridge between the pure loop and the browser.
+- **`server/`** — HTTP. Serves the fixed task context, starts a run, polls a run, and embeds the UI. Thin.
+- **`internal/server/index.html`** — the frontend. **One HTML file, vanilla JS, baked into the binary by `internal/server/assets.go`.** No npm, framework, or build step.
 
 Import direction:
 
 ```
-web → server → run → repair
-                    ├→ prompt
-                    ├→ llm
-                    └→ domain
+browser (HTTP only) → server → run → repair
+                                  ├→ prompt
+                                  ├→ llm
+                                  └→ domain
 task → domain
 run  → domain
 ```
@@ -443,23 +463,24 @@ Then tune the F2 `FirstPrompt` / `RepairPrompt` pair — the repair prompt must 
 every disagreement. For the hackathon, tune only enough to make the flow clear and honest.
 *Done when:* the same task runs in both oracle modes and the comparison is legible.
 
-**Phase 2 — Wrap it in state.** *(the bridge)*
-The `run` package: `StartRun(task)` launches `Repair` in a goroutine and returns a run ID immediately; attempts append to the `Run` as they finish. In-memory store, no database. **Freeze the JSON shape here** (the `Run` struct above) — that frozen contract is what lets the UI be built in parallel.
-*Done when:* you can start a run and query its live status as JSON via curl.
+**Phase 2 — State.** *(implemented F7)*
+`run.Store.StartRun(task)` launches `Repair` in a goroutine and returns a run ID immediately.
+Its synchronous reporter appends completed attempts under a mutex; `GetRun` returns a copy so
+the HTTP encoder never races with mutation. State is process-local and in-memory. The JSON shape
+above is frozen, with `failureMode` and `oraclefailed` reserved for F18/F15.
 
-**Phase 3 — Web server.** *(Go)*
-`net/http` (Go 1.22+ routing is plenty; chi if you prefer). Two endpoints — see The web layer below. Handler starts the run and returns the ID; the goroutine does the work; the client polls.
-*Done when:* curl can start a run and poll it to completion.
+**Phase 3 — Web server.** *(implemented F8)*
+`net/http` serves the injected fixed authored task, starts runs, and returns snapshots. The
+handler returns while the goroutine does the provider and verifier work; the browser polls.
+There is no task-selection request body until F6/F12.
 
-**Phase 4 — The UI.** *(the flashy payoff)*
-One HTML file, vanilla JS, polls every ~500ms and redraws. The money shots — this is where the room's reaction is won:
-- the spec and the frozen oracle sit side by side at the top — the audience reads what was asked, then reads the tests a *different* model derived from it;
-- attempts appear one at a time as cards/columns;
-- each shows attempt number, the code, a red/green status badge, the test output;
-- the final card flips **green** — one clean, unmistakable state change;
-- syntax highlighting via a CDN one-liner (e.g. highlight.js) — cheap polish, big visual lift.
-Served via `embed`: single static binary, UI included.
-*Done when:* you watch it fail red and go green, in the browser, live.
+**Phase 4 — The UI.** *(implemented F9)*
+One embedded HTML file with vanilla JS polls every ~500ms and redraws real run snapshots. The
+fixed authored oracle and task are visible before a provider call. The main wide-screen view is
+three panes: a rejected candidate, its raw verifier feedback, and a later candidate. It renders
+model text via `textContent`, offers attempt selectors, and can download terminal run JSON.
+First-attempt passes and exhausted budgets are shown honestly; no live red → green provider run
+is claimed unless one is actually observed.
 
 **Phase 5 — Stretch.** *(only if the above is solid)*
 Diff between consecutive attempts (highlight what changed — "watch it reason toward correct"). SSE instead of polling so attempts stream the instant they land. Let the user type a task in the UI. **Property tests as the check** instead of examples — a stronger oracle, and the more novel angle. SQLite so runs survive a restart (your OpenLoop already proved this pattern).
@@ -475,7 +496,9 @@ remainder allocation (split $100 three ways — who gets the extra cent?), semve
 ordering, word-wrap edge cases (a single word longer than the line). Pure functions, stdlib
 only, fast, deterministic.
 
-**Parallelism (maps to the hackathon's worktrees theme).** Once the JSON contract is frozen at the end of Phase 2, the loop and the UI stop depending on each other. That's the honest place to fan out: one worktree keeps improving the real loop; another builds the UI against a **mock run** that emits canned attempts on a timer. Merge when both are ready. Not parallelism for show — the fastest path through the back half.
+**Browser truthfulness.** The shipped page renders only snapshots from the real in-memory run
+store. Scripted LLMs are useful in project tests, but the page must not present a scripted
+fixture as a live provider run.
 
 ---
 
@@ -484,19 +507,20 @@ only, fast, deterministic.
 The one contract everything agrees on — deliberately tiny:
 
 ```
-POST /run       → { "id": "run_abc" }     // starts a run, returns immediately
-GET  /run/{id}  → Run (the struct above)  // poll this ~2x/sec
+GET  /task      → fixed authored task context (spec, signature, frozen test source)
+POST /run       → 202 { "id": "run_abc" } // starts the injected fixed demo task immediately
+GET  /run/{id}  → 200 Run                  // poll this ~2x/sec
 ```
 
-The UI just polls `GET /run/{id}` and redraws `Attempts` each tick. When `Status`
-leaves `"running"`, stop polling and do the final flip — green on `passed`, red on
-`gaveup` (showing `FailureMode`), and a distinct neutral state on `oraclefailed`, which
-is a harness problem rather than a verdict on the code. That's the entire frontend contract.
+Unknown run IDs return 404 JSON. The UI reads the fixed task before a provider call, then polls
+`GET /run/{id}` and redraws `Attempts` each tick. When `Status` leaves `"running"`, it stops
+polling and shows green on `passed`, red on `gaveup`, and neutral on
+`infrastructurefailed` or the F15/F16-reserved `oraclefailed`. `FailureMode` is reserved until
+F18.
 
-**UI stack: one static HTML file, vanilla JS, served via Go `embed`.** No SvelteKit,
-no npm, no build step — you get the live visual demo without any of the web-tooling
-weight. (Your OpenLoop's SvelteKit setup is a fallback if you want components later,
-but it's more moving parts than a one-day demo needs.)
+**UI stack: one static HTML file, vanilla JS, served via Go `embed`.** The comparison-first
+layout places a rejected candidate, exact verifier feedback, and a later candidate side by side.
+All source and output becomes DOM text, never HTML.
 
 ---
 

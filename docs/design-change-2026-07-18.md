@@ -1,6 +1,7 @@
 # Design Change — Blind Oracle Modes (2026-07-18)
 
-**Status:** adopted. Docs updated; no code written yet.
+**Status:** adopted. The authored-oracle path F1–F4 and browser path F7–F9 are now implemented;
+F15–F18 remain future work.
 **Landed after:** F1, C3. **Landed before:** F2.
 **Scope:** build the hackathon flow first; the research-inspired diagnostics come after it works.
 **Files changed:** `AGENTS.md`, `README.md`, `docs/go-repair-loop.md`,
@@ -9,7 +10,7 @@
 
 This document explains *why* the project's central rule changed and the research-inspired
 question the completed flow can later help explore. It does not turn the hackathon into a
-separate research platform. Read it before picking up F2 or anything later. If this document
+separate research platform. Read it before picking up F15 or later generated-mode work. If this document
 and an older comment in the code disagree, this document wins.
 
 ---
@@ -146,21 +147,21 @@ oracle generator simultaneously means two unproven halves and no way to tell whi
 broken. The authored oracle is a known-good fixture; earn the loop against it first.
 
 The one forward-looking requirement: `Repair` should already take its coder as an explicit
-parameter, so F15 can add the test-writer without reshaping the call.
+parameter, so F15 can deliberately extend the API with a test-writer after its contracts exist.
 
 ### Phase 1 — the test-writer arrives
 
 - **F15 — Generated oracle.** Add `domain.OracleMode` + `Task.Oracle`; add pure
-  `prompt.TestPrompt(spec, signature)`; add `repair.resolveOracle` calling the test-writer
-  exactly once before attempt 1 and freezing the result; extend `Repair` to take coder + tester
-  `llm.LLM` values. Add a unit test asserting the coder prompt builders never receive
-  `TestCode`.
+  `prompt.TestPrompt(spec, signature)`; add `repair.resolveOracle` to obtain and freeze one
+  accepted oracle before attempt 1; extend `Repair` to take coder + tester `llm.LLM` values.
+  F16 may retry rejected oracle candidates only before any coder call exists. Add a unit test
+  asserting the coder prompt builders never receive `TestCode`.
 - **F16 — Oracle preflight + fault attribution.** A non-compiling generated oracle must never be
-  charged to the coder. Primary rule (cheap, stdlib-only): attribute `go build` errors by file
-  position — if every error is inside `solution_test.go`, it is an oracle fault; regenerate up
-  to an injected cap; exhausting the cap ends the run `oraclefailed`, which is neither a pass
-  nor a coder failure. Stretch: synthesize a signature-derived stub with `go/parser` and compile
-  the oracle against it before spending a coder generation (stub is built, never run).
+  charged to the coder. `go build` ignores `*_test.go`, so compile the generated test with
+  `go test -c` against a signature-derived stub before spending a coder generation. A preflight
+  failure is an oracle fault; regenerate up to an injected cap; exhausting it ends the run
+  `oraclefailed`, which is neither a pass nor a coder failure. Use `go/parser` if needed to
+  derive the stub safely from the pinned signature; the stub is built, never run.
 - **F17 — Split role models.** Two `llm.LLM` values at the composition root.
   `internal/llm` stays role-agnostic — role separation is the caller's job.
 - **F18 — Failure mode signal.** On `gaveup`, intersect failing test names across attempts;
@@ -188,16 +189,19 @@ type Task struct {
 ```
 
 ```go
-// internal/run — freeze ALL of these at F7, even though F15/F18 land later.
-// Adding fields after the freeze breaks the parallel-UI contract F7 exists to create.
+// internal/run — frozen at F7, even though F15/F18 land later.
+// Adding fields after the freeze breaks the browser contract.
 type Run struct {
     ID          string           `json:"id"`
     Task        string           `json:"task"`
     Spec        string           `json:"spec"`
+    Signature   string           `json:"signature"`
     Oracle      string           `json:"oracle"`      // NEW: "authored" | "generated"
     TestCode    string           `json:"testCode"`    // NEW: the frozen oracle, for display
-    Status      string           `json:"status"`      // + NEW value "oraclefailed"
+    MaxAttempts int              `json:"maxAttempts"`
+    Status      Status           `json:"status"`      // running | passed | gaveup | infrastructurefailed | oraclefailed
     FailureMode string           `json:"failureMode"` // NEW: "" | "varied" | "persistent"
+    Error       string           `json:"error"`
     Attempts    []domain.Attempt `json:"attempts"`
 }
 ```
@@ -229,10 +233,11 @@ does on its own.
 
 ### UI (F9)
 
-The spec and the frozen oracle sit side by side at the top, labelled with the oracle mode, so a
-viewer can read what was asked and then read the tests a *different* model derived from it.
-Final state: green on `passed`, red on `gaveup` (showing the failure mode), and a distinct
-neutral state on `oraclefailed` — a harness problem, not a verdict on the code.
+The implemented page shows the spec and frozen **authored** oracle side by side before a provider
+call, then compares real candidate source and verifier feedback. Final state is green on
+`passed`, red on `gaveup`, and neutral on `infrastructurefailed`; `oraclefailed` and
+`failureMode` are reserved for F15/F16 and F18. In generated mode, the same placement will let a
+viewer inspect the frozen independently derived oracle without claiming it is verification.
 
 ## 9. What "done" looks like now
 

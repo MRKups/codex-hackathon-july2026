@@ -59,22 +59,30 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   `internal/repair`), `go vet ./...`, and `git diff --check` passed. No live provider call was
   required.
 
-- [ ] **F4 — Repair loop + one hardcoded task.** `internal/repair` `Repair(...)` wiring
+- [x] **F4 — Repair loop + one hardcoded task.** `internal/repair` `Repair(...)` wiring
   `llm.LLM` + `domain.Task` through generate → verify → feedback → retry, plus
   `cmd/repair/main.go` running ONE hardcoded, **authored-mode** tricky task and printing each
   attempt's number, pass/fail, and output through the attempt reporter.
   Depends on: F1, F2, F3.
-  Scope note: `authored` mode only. `Repair` should already take its coder as a parameter so
-  F15 can add the test-writer without reshaping the call.
+  Scope note: `authored` mode only. F4 takes an explicit coder; F15 deliberately extends the
+  loop with a test-writer after the generated-oracle contracts exist.
   **Milestone: `attempt 1 fail → … → attempt N pass` in the terminal. Protect this.**
+  Verification (2026-07-18): a scripted LLM proves fail → exact verifier feedback → pass,
+  extraction of fenced code, synchronous reporting, no oracle-source leak into coder prompts,
+  exhaustion, provider failure, reporter failure, and pre-provider input validation. The fixed
+  split-cents CLI oracle accepts a reference implementation. `gofmt -l $(rg --files -g '*.go')`,
+  `go build ./...`, `go test ./...`, `go test -race ./...`, `go test -cover ./...` (86.8% for
+  `internal/repair`), `go vet ./...`, and `git diff --check` passed. No live provider call was
+  required.
 
 ### Phase 1 — The test-writer, then loop quality (still terminal)
 
 - [ ] **F15 — Generated oracle (the design change).** Add `domain.OracleMode` +
   `Task.Oracle`; add pure `prompt.TestPrompt(spec, signature)` requiring a complete
   `package solution` test file, stdlib `testing` only, table-driven, no implementation; add
-  `repair.resolveOracle` calling the test-writer **exactly once before attempt 1** and freezing
-  the result; extend `Repair` to take coder + tester `llm.LLM` values.
+  `repair.resolveOracle` to obtain and freeze one accepted oracle before attempt 1; extend
+  `Repair` to take coder + tester `llm.LLM` values. F16 may retry rejected oracle candidates,
+  but only before any coder call exists.
   Depends on: F4.
   Non-negotiable: `TestPrompt` takes spec and signature only — no parameter may carry candidate
   code — and nothing after `resolveOracle` may regenerate the oracle. Add a unit test asserting
@@ -82,10 +90,11 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   Verify — run the same task in both modes; both reach a verdict.
 
 - [ ] **F16 — Oracle preflight + fault attribution.** A non-compiling generated oracle must
-  never be charged to the coder. Primary: attribute `go build` errors by file position — all
-  errors inside `solution_test.go` means oracle fault; regenerate up to an injected oracle cap;
-  exhausting it ends the run `oraclefailed`. Stretch: synthesize a signature-derived stub via
-  `go/parser` and compile the oracle before the first coder call (stub is built, never run).
+  never be charged to the coder. `go build` ignores `*_test.go`, so preflight the generated
+  oracle before any coder call by compiling it with `go test -c` against a signature-derived
+  stub (built, never run). A preflight failure is an oracle fault; regenerate up to an injected
+  cap, then end `oraclefailed` if no candidate is accepted. Use `go/parser` if needed to derive
+  the stub safely from the pinned signature.
   Depends on: F15.
 
 - [ ] **F17 — Split coder and test-writer models.** `LLM_MODEL_CODER` / `LLM_MODEL_TESTER`,
@@ -114,35 +123,44 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
 
 ### Phase 2 — State (the bridge)
 
-- [ ] **F7 — Run orchestration + store.** `internal/run`: `StartRun(domain.Task)` launches
-  `Repair` in a goroutine and returns a run ID immediately; `domain.Attempt` values append to a
-  `Run` as they finish; in-memory `map[string]*Run` + mutex. **Freeze the `Run` JSON shape
-  here** — this contract unblocks parallel UI work.
+- [x] **F7 — Run orchestration + store.** `internal/run.Store` starts authored-oracle
+  `Repair` calls in goroutines and returns stable IDs immediately. Its synchronous reporter
+  appends `domain.Attempt` values under a mutex; `GetRun` returns a copied snapshot. State is an
+  in-memory `map[string]*Run` for the lifetime of the process. The JSON shape is frozen with
+  `signature`, `maxAttempts`, `oracle`, `testCode`, `failureMode`, `error`, and statuses
+  `running`, `passed`, `gaveup`, `infrastructurefailed`, and the F15/F16-reserved
+  `oraclefailed`.
   Depends on: F4.
-  The frozen shape must already include `oracle`, `testCode`, `failureMode`, and the
-  `oraclefailed` status, even if F15/F18 have not landed — adding fields after the freeze
-  breaks the parallel-UI contract this item exists to create.
-  Verify — start a run and poll its status as JSON via curl.
+  Current runs set `oracle` to `authored`; `failureMode` remains empty until F18.
+  Verification (2026-07-18): scripted coder tests exercised real Go verification through
+  failed → passed, provider infrastructure failure, input validation, immutable snapshots, and
+  polling to a terminal state.
 
 ### Phase 3 — Web server
 
-- [ ] **F8 — HTTP layer.** `internal/server` + `cmd/repair -serve`: `POST /run` (start, return
-  ID) and `GET /run/{id}` (status + attempts). Use Go 1.22+ `net/http` routing; add `chi`
-  only if a concrete need justifies it.
+- [x] **F8 — HTTP layer.** `internal/server` + `cmd/repair -serve` use Go 1.22+ `net/http`
+  routing. `GET /task` returns the injected fixed authored task for display; `POST /run` returns
+  `202 {"id":"run_..."}` and starts it; `GET /run/{id}` returns the live `Run` snapshot;
+  unknown IDs return `404 {"error":"run not found"}`. JSON responses are `Cache-Control:
+  no-store`. There is no task request body or task selector until F6/F12.
   Depends on: F7.
-  Verify — curl starts a run and polls it to completion.
+  Verification (2026-07-18): handler tests serve the embedded page, fixed task context, start a
+  real verifier-backed scripted run, and poll it to `passed`.
 
 ### Phase 4 — UI (the flashy payoff)
 
-- [ ] **F9 — Embedded UI.** `web/index.html` + `web/embed.go`: vanilla JS polling
-  `GET /run/{id}` ~2x/sec and redrawing. The spec and the frozen oracle sit side by side at the
-  top, labelled with the oracle mode, so a viewer can read what was asked and then read the
-  tests a different model derived from it. Attempts appear one at a time as cards; each shows
-  number, code, a red/green badge, and test output; the final card flips green on `passed`, red
-  on `gaveup` (showing the failure mode), and a distinct neutral state on `oraclefailed`.
-  Syntax highlighting via a CDN one-liner. Served via `//go:embed`.
+- [x] **F9 — Embedded UI.** `internal/server/index.html`, embedded by
+  `internal/server/assets.go`, is plain HTML/CSS/vanilla JS—no framework, CDN, npm, or build
+  step. It preloads the fixed task and frozen **authored** oracle, polls live runs every 500ms,
+  and uses DOM text nodes for all source/output. Its comparison-first desktop layout places a
+  rejected candidate, exact verifier feedback, and a later candidate side by side; selectors
+  support other attempt pairs and terminal runs can be downloaded as JSON. It shows first-attempt
+  passes, exhaustion, and infrastructure failure honestly; it does not fabricate a live red →
+  green result.
   Depends on: F8.
-  Verify — watch a run fail red and go green in the browser.
+  Verification (2026-07-18): the inline script parsed successfully, static checks found no
+  external asset/framework or `innerHTML` usage, and the server test serves the embedded page.
+  A real browser/provider rehearsal remains opt-in and was not run during this change.
 
 ### Phase 5 — Stretch (only if the above is solid)
 

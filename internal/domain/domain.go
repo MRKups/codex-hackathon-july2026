@@ -13,8 +13,8 @@ type Task struct {
 // Attempt records one generated candidate and the result of verifying it.
 // Output is empty on success; otherwise it is failed-stage output or a stable verifier-timeout note.
 type Attempt struct {
-	N      int
-	Code   string
-	Passed bool
-	Output string
+	N      int    `json:"n"`
+	Code   string `json:"code"`
+	Passed bool   `json:"passed"`
+	Output string `json:"output"`
 }
