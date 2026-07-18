@@ -6,12 +6,39 @@ that owns it.
 
 ## Current Structure
 
+```text
+.
+├── .gitattributes
+├── .gitignore
+├── AGENTS.md
+├── README.md
+├── go.mod                        # Module codex-hackathon-july2026 + Go 1.26
+├── internal/
+│   └── llm/                      # Provider boundary + OpenAI-compatible client [F1]
+│       ├── llm.go
+│       ├── client.go
+│       └── client_test.go
+└── docs/
+    ├── go-repair-loop.md
+    ├── app-architecture.md
+    ├── file-structure.md
+    └── tracker.md
+```
+
+F1 is locally verified but remains in progress until a configured provider returns one real
+completion. Every path outside `internal/llm` in the target tree is still planned.
+
+## Target Structure
+
+The following layout is the intended end state. Paths marked F2 onward are not created
+until their tracker item starts.
+
 ```
 .
 ├── README.md                     # Overview, stack, run/build commands
 ├── AGENTS.md                     # Agent guardrails & non-negotiables (Codex reads this)
-├── go.mod                        # Module (module repairloop) + Go 1.26
-├── go.sum                        # Dependency checksums
+├── go.mod                        # Module (codex-hackathon-july2026) + Go 1.26
+├── go.sum                        # Dependency checksums, once a dependency is added
 ├── Taskfile.yml                  # Optional: go run/build/test shortcuts
 ├── .gitignore                    # Standard Go ignores (binary, /tmp, etc.)
 │
@@ -22,7 +49,8 @@ that owns it.
 ├── internal/
 │   ├── llm/                      # Provider interface + OpenAI-compatible client            [F1]
 │   │   ├── llm.go                #   LLM interface
-│   │   └── client.go             #   concrete client (base URL/key/model from env)
+│   │   ├── client.go             #   concrete client (base URL/key/model/timeout from env)
+│   │   └── client_test.go        #   local OpenAI-compatible client tests
 │   ├── prompt/                   # firstPrompt / repairPrompt / extractGoCode — PURE        [F2]
 │   │   └── prompt.go
 │   ├── repair/                   # The loop: Repair, runTests (temp module + go test)       [F3]
@@ -63,7 +91,7 @@ that owns it.
   `solution_test.go`). Dropping in a new folder is enough — no registration step.
 - **Temp modules:** the loop writes generated code into `os.MkdirTemp` modules and removes
   them after each run. They never live in the repo.
-- **No path aliases:** Go uses the module path (`repairloop/internal/...`). `internal/` means
+- **No path aliases:** Go uses the module path (`codex-hackathon-july2026/internal/...`). `internal/` means
   those packages can't be imported outside this module — intentional.
 - **Generated artifacts:** the built binary and any scratch dirs are git-ignored.
 - **Archiving:** superseded code moves to `_archive/`, not the trash.

@@ -4,7 +4,8 @@ A minimal **generate → test → repair** loop in Go. An LLM writes a Go functi
 spec; the Go toolchain checks it; on failure the error is fed back and the model
 tries again, until the tests pass or attempts run out.
 
-No sandbox, no external services, no Python/JS. The Go toolchain *is* the verifier:
+No sandbox, no additional infrastructure services, no Python/JS. The configured LLM is the
+only external HTTP dependency; the Go toolchain *is* the verifier:
 
 - `go build` (the compiler) rejects most bad output for free, before anything runs — **checker #1**.
 - `go test` runs human-written tests — **checker #2**.
@@ -78,6 +79,7 @@ package repair
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -90,8 +92,9 @@ type LLM interface {
 }
 
 // Repair is the outer loop: try up to maxAttempts times to satisfy the task.
-// Returns the final attempt (passed or not) and only errors on infra failures.
-func Repair(ctx context.Context, model LLM, task Task, maxAttempts int) (Attempt, error) {
+// Its attempt cap and test timeout are injected by the caller. It returns the final
+// attempt (passed or not) and only errors on infrastructure failures.
+func Repair(ctx context.Context, model LLM, task Task, maxAttempts int, testTimeout time.Duration) (Attempt, error) {
 	var last Attempt // zero value: N==0, signals "first attempt" to generate()
 
 	for i := 1; i <= maxAttempts; i++ {
@@ -100,7 +103,10 @@ func Repair(ctx context.Context, model LLM, task Task, maxAttempts int) (Attempt
 			return last, err // real infra error (network, etc.) — bubble up
 		}
 
-		passed, output := runTests(ctx, task, code)
+		passed, output, err := runTests(ctx, task, code, testTimeout)
+		if err != nil {
+			return last, err
+		}
 
 		last = Attempt{N: i, Code: code, Passed: passed, Output: output}
 		if passed {
@@ -129,38 +135,58 @@ func generate(ctx context.Context, model LLM, task Task, prev Attempt) (string, 
 	return extractGoCode(raw), nil // TODO: strip ```go fences; treat output as untrusted text
 }
 
-// runTests writes a tiny throwaway Go module and runs `go test` against it.
-// Returns pass/fail and the combined output. A non-zero exit (compile error OR
-// test failure) is NOT an infra error here — it's exactly the signal we want.
-func runTests(ctx context.Context, task Task, code string) (passed bool, output string) {
+// runTests writes a tiny throwaway Go module, then runs `go build` and `go test` against it.
+// A non-zero build/test exit is feedback. Filesystem, context-cancellation, and command
+// launch failures return an infrastructure error.
+func runTests(ctx context.Context, task Task, code string, timeout time.Duration) (passed bool, output string, infraErr error) {
 	dir, err := os.MkdirTemp("", "repair-*")
 	if err != nil {
-		return false, "could not create temp dir: " + err.Error()
+		return false, "", err
 	}
 	defer os.RemoveAll(dir)
 
 	// A self-contained module. stdlib only in v1 → no `go mod tidy` needed.
-	write(dir, "go.mod", "module solution\n\ngo 1.26\n")
-	write(dir, "solution.go", ensurePackage(code)) // TODO: guarantee `package solution` header
-	write(dir, "solution_test.go", task.TestCode)   // human-written; already `package solution`
+	if err := write(dir, "go.mod", "module solution\n\ngo 1.26\n"); err != nil {
+		return false, "", err
+	}
+	if err := write(dir, "solution.go", code); err != nil {
+		return false, "", err
+	}
+	if err := write(dir, "solution_test.go", task.TestCode); err != nil {
+		return false, "", err
+	}
 
 	// Timeout instead of a sandbox — kills runaway/infinite-loop code.
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	testContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "go", "test", "./...")
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
+	for _, args := range [][]string{{"build", "./..."}, {"test", "./..."}} {
+		cmd := exec.CommandContext(testContext, "go", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
 
-	if ctx.Err() == context.DeadlineExceeded {
-		return false, "timeout — generated code likely hung (infinite loop)"
+		if contextErr := testContext.Err(); contextErr != nil {
+			if contextErr == context.DeadlineExceeded {
+				return false, "timeout — generated code likely hung (infinite loop)", nil
+			}
+			return false, "", contextErr
+		}
+		if err == nil {
+			continue
+		}
+
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			return false, "", err
+		}
+		return false, string(out), nil
 	}
-	// go test exits 0 on pass, non-zero on compile error or failing test.
-	return err == nil, string(out)
+
+	return true, "", nil
 }
 
-func write(dir, name, content string) {
-	_ = os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644)
+func write(dir, name, content string) error {
+	return os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644)
 }
 ```
 
@@ -168,8 +194,7 @@ Helpers left for you / Codex to fill in:
 
 - `firstPrompt(task) string` — spec + signature, instruct "output only a Go function, package `solution`, stdlib only, no explanation."
 - `repairPrompt(task, prev) string` — same, plus the previous code and the exact `go test` output, instruct "fix the code so the tests pass."
-- `extractGoCode(raw) string` — pull the code out of the model's reply (strip markdown fences). Don't "repair" it — just extract; if it's junk, the compiler will say so next pass.
-- `ensurePackage(code) string` — if the generated code lacks a `package solution` line, prepend one. Cheap guard against a common failure.
+- `extractGoCode(raw) string` — pull the code out of the model's reply (strip complete markdown fences when present). Don't "repair" it — never add a package header or alter the code; if it is junk, the compiler will say so next pass.
 
 ---
 
@@ -177,7 +202,7 @@ Helpers left for you / Codex to fill in:
 
 Break it into small Go packages, each with one job. Nothing points back up the list.
 
-- **`llm/`** — talks to the model. One interface (`LLM`), one concrete client (OpenAI-compatible chat completions). Owns the HTTP call, the API key from env, and a per-call timeout + one retry. Nothing else in the system knows or cares which provider you use.
+- **`llm/`** — talks to the model. One interface (`LLM`), one concrete client (OpenAI-compatible chat completions). Owns the HTTP call and reads `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, and `LLM_TIMEOUT` from env. It applies a per-call timeout + one retry. Nothing else in the system knows or cares which provider you use.
 - **`prompt/`** — turns a task (+ optional previous attempt) into a prompt string, and pulls Go code back out of a model reply (`firstPrompt`, `repairPrompt`, `extractGoCode`). Pure string work, no I/O. Trivial to test and iterate — **this is where loop quality actually lives**, so keep it isolated.
 - **`repair/`** — the loop itself (`Repair`, `runTests`). Depends on `llm` + `prompt`. Owns the temp-dir-and-`go test` machinery and the retry logic. The heart; everything else is scaffolding around it.
 - **`task/`** — the `Task` type and where tasks come from. v1: a hardcoded slice. Later: load from a folder per task (`spec.md` + `solution_test.go`). Later still: built from an API request.
@@ -254,7 +279,7 @@ but it's more moving parts than a one-day demo needs.)
 
 ## Gotchas
 
-- **Package header.** Generated code and the test file must share a package (`solution`). Instruct the model, and keep `ensurePackage` as a backstop.
+- **Package header.** Generated code and the test file must share a package (`solution`). Instruct the model; a missing header is compiler feedback for the next attempt, not something the host rewrites.
 - **Stdlib only in v1.** If the model imports third-party packages you'd need `go mod tidy` and network. Forbid it in the prompt; keep tasks pure-function so it never needs to.
-- **Test-failure is not a program error.** `cmd.CombinedOutput()` returns a non-nil `err` on any non-zero exit. That's expected on a failing test — don't bubble it up as an infra failure. Only a timeout or a filesystem/exec problem is "real."
+- **Test-failure is not a program error.** `cmd.CombinedOutput()` returns a non-nil `err` on any non-zero exit. That's expected on a failing test — don't bubble it up as an infra failure. Provider, filesystem, command-launch, and caller-cancellation failures are "real" errors.
 - **Untrusted output.** Treat the model's reply as text. Extract the code; never `eval`/trust formatting.

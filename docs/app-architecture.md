@@ -20,14 +20,24 @@ Big constraints, stated up front:
 - **Tests are human-authored and separate from code generation** (see AGENTS.md).
 - **State is in-memory** in v1. Nothing persists across restarts (SQLite is a stretch).
 
+## Implementation Status
+
+As of 2026-07-18, only F1 is implemented. The repository contains the Go module and
+`internal/llm`: the `LLM` interface, an OpenAI-compatible client, environment-backed
+configuration, and local tests. The client is locally verified with build, unit, race,
+coverage, and vet checks; live-provider verification awaits configured `LLM_*` values.
+
+`prompt`, `repair`, `task`, `run`, `server`, `web`, and `cmd/repair` do not exist yet.
+F1 must make one real completion before F2 begins.
+
 ## Technology Stack
 
 | Layer | Technology |
 |---|---|
 | Language | Go 1.26 |
-| HTTP router | `chi` |
+| HTTP router (F8) | Go 1.22+ `net/http` routing; `chi` only if a concrete need justifies it |
 | Frontend | single HTML file + vanilla JS, embedded via `//go:embed` |
-| LLM provider | OpenAI-compatible chat completions endpoint (set by base URL + key + model) |
+| LLM provider | OpenAI-compatible chat completions endpoint (set by base URL + key + model + timeout) |
 | Verifier (the "oracle") | `go build` + `go test` in a temp module |
 | Run state | in-memory `map[string]*Run` + mutex (SQLite via `modernc.org/sqlite` as a stretch) |
 | Concurrency | one goroutine per run; status exposed for polling |
@@ -41,13 +51,21 @@ with `task` feeding `run`. Nothing imports upward; no cycles.
 
 | Package | Responsibility |
 |---|---|
-| `internal/llm` | The `LLM` interface + one concrete client for an OpenAI-compatible endpoint. Owns the HTTP call, and reads base URL + API key + model from env. Per-call timeout + one retry. The interface keeps the rest of the code independent of any specific provider — swapping providers is a base-URL/key/model change here and nowhere else. |
+| `internal/llm` | The `LLM` interface + one concrete client for an OpenAI-compatible endpoint. Owns the HTTP call, and reads base URL + API key + model + timeout from env. Per-call timeout + one retry. The interface keeps the rest of the code independent of any specific provider — swapping providers is a base-URL/key/model change here and nowhere else. |
 | `internal/prompt` | `firstPrompt`, `repairPrompt`, `extractGoCode`. Pure string work, no I/O. Loop quality lives here. |
 | `internal/repair` | The loop: `Repair`, `runTests`. Temp-module + `go test` machinery + retry logic. The heart. |
 | `internal/task` | The `Task` type and task loading (hardcoded → files under `tasks/`). |
 | `internal/run` | Orchestration + state. Launches `Repair` in a goroutine, appends attempts to a `Run` as they land, answers "status of run X." In-memory. |
 | `internal/server` | HTTP handlers (start a run, poll a run) + serving the embedded UI. Thin. |
 | `web` | One HTML file + vanilla JS, baked into the binary. Polls the run endpoint and redraws. |
+
+### Current F1 client behavior
+
+`LLM_BASE_URL` is an API base URL (it may include `/v1`); the client appends
+`/chat/completions`. It applies one timeout to the whole completion operation and makes one
+immediate retry after a request/read error, HTTP 429, or HTTP 5xx. It currently permits
+`http://` for local test/development providers, so non-local providers must use HTTPS.
+The retry and transport hardening work is tracked in C2.
 
 ## Data Shapes
 
@@ -80,7 +98,7 @@ type Run struct {
 1. `generate` builds a prompt (spec on attempt 1; previous code + `go test` output on
    later attempts) and asks the model for a Go function.
 2. `runTests` writes `go.mod` + `solution.go` + `solution_test.go` into an `os.MkdirTemp`
-   module and runs `go test ./...` under a timeout.
+   module, runs `go build ./...`, then runs `go test ./...` under the injected timeout.
 3. Pass → return. Fail → record the attempt, feed its output into the next `generate`.
 4. Stop at `maxAttempts`.
 
@@ -101,9 +119,12 @@ SQLite (`modernc.org/sqlite`, zero-CGO) is a stretch item if runs need to surviv
 
 ## Error Handling
 
-- Expected failures (bad model reply, failing tests) are recorded as a failed `Attempt` and
-  drive the next iteration — they are **not** program errors.
-- A generation timeout is recorded as a failed attempt with a "likely infinite loop" note.
+- A valid text completion — even one that is invalid Go — is recorded as a failed `Attempt`
+  and drives the next iteration; it is **not** a program error.
+- Provider transport/protocol failures (network errors, non-success API responses, malformed
+  response JSON) are infrastructure errors until a later design explicitly classifies them.
+- A generated-code test-execution timeout is recorded as a failed attempt with a "likely
+  infinite loop" note. An LLM completion timeout is a provider/infrastructure error.
 - Only genuine infra faults (network down, can't create temp dir, `go` not on PATH) bubble
   up as Go errors.
 

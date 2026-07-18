@@ -1,7 +1,7 @@
 # Repair Loop — Implementation Tracker
 
-*Global ID Counter: Next items are **F15, C2, B1**.
-Branch strategy: `dev` (active dev) — `main` (production).*
+*Identifier counter: the next new items after this initial plan are **F15, C4, B1**.
+Branch strategy: `main` (active development and production during the hackathon).*
 
 Status markers: `[ ]` not started · `[~]` in progress · `[x]` done.
 Work the phases in order. **Phase 0 must be green before anything in Phase 3+ begins.**
@@ -10,10 +10,15 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
 
 ### Phase 0 — Core loop, terminal (critical path)
 
-- [ ] **F1 — LLM client.** `internal/llm`: the `LLM` interface + one concrete client for an
-  OpenAI-compatible endpoint (`Complete(ctx, prompt) (string, error)`). Base URL, key, and
-  model from env. Per-call timeout + one retry. Verify in isolation — a single completion
+- [~] **F1 — LLM client.** `internal/llm`: the `LLM` interface + one concrete client for an
+  OpenAI-compatible endpoint (`Complete(ctx, prompt) (string, error)`). Base URL, key, model,
+  and timeout from env. Per-call timeout + one retry. Verify in isolation — a single completion
   returning text — before wiring anything else.
+  Local verification (2026-07-18): `go build ./...`, `go test ./...`, `go test -race ./...`,
+  `go test -cover ./...` (73.3%), `go vet ./...`, and `gofmt` passed. Tests include a
+  standard-library `httptest` completion, retry, and timeout coverage.
+  Live verification remains: configure `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, and
+  `LLM_TIMEOUT`, then make one real completion before starting F2.
 
 - [ ] **F2 — Prompt + extraction.** `internal/prompt` (pure, no I/O): `firstPrompt(task)`,
   `repairPrompt(task, prev)`, `extractGoCode(raw)`. First prompt = spec + signature +
@@ -21,9 +26,10 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   includes the previous code and the exact `go test` output.
 
 - [ ] **F3 — runTests.** `internal/repair`: write `go.mod` + `solution.go` + `solution_test.go`
-  into an `os.MkdirTemp` module, run `go test ./...` under a context timeout, return
-  (passed, combined output). A non-zero exit is a test result, not an infra error; a timeout
-  is a failed attempt with an "infinite loop" note.
+  into an `os.MkdirTemp` module, run `go build ./...` then `go test ./...` under an injected
+  context timeout, return `(passed, combined output, error)`. A non-zero build/test exit is
+  feedback, not an infra error; a timeout is a failed attempt with an "infinite loop" note.
+  Filesystem, command-launch, and caller-cancellation failures must bubble up as errors.
 
 - [ ] **F4 — Repair loop + one hardcoded task.** `internal/repair` `Repair(...)` wiring
   generate → runTests → feed-back → retry, plus `cmd/repair/main.go` running ONE hardcoded
@@ -53,7 +59,8 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
 ### Phase 3 — Web server
 
 - [ ] **F8 — HTTP layer.** `internal/server` + `cmd/repair -serve`: `POST /run` (start, return
-  ID) and `GET /run/{id}` (status + attempts). `chi` routing.
+  ID) and `GET /run/{id}` (status + attempts). Use Go 1.22+ `net/http` routing; add `chi`
+  only if a concrete need justifies it.
   Depends on: F7.
   Verify — curl starts a run and polls it to completion.
 
@@ -81,6 +88,17 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   human-authored and never generated in the same context as the code. When adding tasks
   (F6) or task input (F12), make it structurally impossible to auto-generate the tests
   alongside the solution. Re-check whenever the task-authoring path changes.
+
+- [ ] **C2 — Harden F1 transport and retry policy before production use.** The current client
+  permits `http://` for local development and makes one immediate retry after request/read
+  errors, HTTP 429, or HTTP 5xx. Before production or repeated non-local use, restrict plaintext
+  HTTP or require an explicit opt-in, honor `Retry-After`/backoff, and narrow retries to known
+  temporary failures so a paid POST is not duplicated unnecessarily.
+
+- [ ] **C3 — Resolve Phase 0 data and error contracts before F2/F3.** Define ownership of
+  `Task` and `Attempt` so the pure `prompt` package never imports upward into `repair`; also
+  decide how `repair` distinguishes valid-but-bad generated text (attempt feedback) from
+  malformed provider protocol responses (infrastructure error).
 
 ## Bugs (B)
 
