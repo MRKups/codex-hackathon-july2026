@@ -1,6 +1,6 @@
 # Repair Loop — Implementation Tracker
 
-*Identifier counter: the next new items are **F19, C6, B1**.
+*Identifier counter: the next new items are **F19, C6, B2**.
 Branch strategy: `main` (active development and production during the hackathon).*
 
 > **Design change, 2026-07-18 (after F1/C3, before F2).** The oracle is no longer
@@ -127,25 +127,32 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   `Repair` calls in goroutines and returns stable IDs immediately. Its synchronous reporter
   appends `domain.Attempt` values under a mutex; `GetRun` returns a copied snapshot. State is an
   in-memory `map[string]*Run` for the lifetime of the process. The JSON shape is frozen with
-  `signature`, `maxAttempts`, `oracle`, `testCode`, `failureMode`, `error`, and statuses
-  `running`, `passed`, `gaveup`, `infrastructurefailed`, and the F15/F16-reserved
-  `oraclefailed`.
+  `signature`, `maxAttempts`, `oracle`, `testCode`, `stage`, `currentAttempt`, `startedAt`,
+  `deadlineAt`, `failureMode`, and `error`. Statuses are `running`, `passed`, `gaveup`,
+  `canceled`, `timedout`, `infrastructurefailed`, and the F15/F16-reserved `oraclefailed`.
   Depends on: F4.
-  Current runs set `oracle` to `authored`; `failureMode` remains empty until F18.
+  Current runs set `oracle` to `authored`; `failureMode` remains empty until F18. Each browser
+  run owns a bounded context and private cancel function. Its live stage moves from `starting`
+  to `waitingforprovider` and `verifying`; cancellation is `canceling`, and all terminal runs
+  are `complete`. A total deadline becomes `timedout`, while a per-call provider timeout remains
+  an infrastructure outcome.
   Verification (2026-07-18): scripted coder tests exercised real Go verification through
-  failed → passed, provider infrastructure failure, input validation, immutable snapshots, and
-  polling to a terminal state.
+  failed → passed, provider infrastructure failure, input validation, immutable snapshots,
+  provider-wait and verifier stages, explicit cancellation, and whole-run timeout.
 
 ### Phase 3 — Web server
 
 - [x] **F8 — HTTP layer.** `internal/server` + `cmd/repair -serve` use Go 1.22+ `net/http`
   routing. `GET /task` returns the injected fixed authored task for display; `POST /run` returns
-  `202 {"id":"run_..."}` and starts it; `GET /run/{id}` returns the live `Run` snapshot;
-  unknown IDs return `404 {"error":"run not found"}`. JSON responses are `Cache-Control:
-  no-store`. There is no task request body or task selector until F6/F12.
+  `202 {"id":"run_..."}` and starts it; `POST /run/{id}/cancel` accepts a live cancellation;
+  and `GET /run/{id}` returns the live `Run` snapshot. Unknown IDs return `404
+  {"error":"run not found"}`; cancel requests after a terminal outcome return `409`. JSON
+  responses are `Cache-Control: no-store`. There is no task request body or task selector until
+  F6/F12.
   Depends on: F7.
   Verification (2026-07-18): handler tests serve the embedded page, fixed task context, start a
-  real verifier-backed scripted run, and poll it to `passed`.
+  real verifier-backed scripted run and poll it to `passed`; a context-aware scripted provider
+  proves the cancel endpoint reaches `canceled` and handles unknown/terminal IDs correctly.
 
 ### Phase 4 — UI (the flashy payoff)
 
@@ -154,9 +161,12 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   step. It preloads the fixed task and frozen **authored** oracle, polls live runs every 500ms,
   and uses DOM text nodes for all source/output. Its comparison-first desktop layout places a
   rejected candidate, exact verifier feedback, and a later candidate side by side; selectors
-  support other attempt pairs and terminal runs can be downloaded as JSON. It shows first-attempt
-  passes, exhaustion, and infrastructure failure honestly; it does not fabricate a live red →
-  green result.
+  support other attempt pairs and terminal runs can be downloaded as JSON. It names the actual
+  live stage (provider wait, Go verification, or cancellation), shows elapsed time against the
+  server-owned run deadline, binds polls to one run ID/generation so late responses cannot
+  overwrite a later run, and keeps a second run disabled while server state is uncertain. It
+  shows first-attempt passes, exhaustion, cancellation, timeout, and infrastructure failure
+  honestly; it does not fabricate a live red → green result.
   Depends on: F8.
   Verification (2026-07-18): the inline script parsed successfully, static checks found no
   external asset/framework or `innerHTML` usage, and the server test serves the embedded page.
@@ -234,7 +244,16 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
 *None yet.*
 
 ### High
-*None yet.*
+
+- [x] **B1 — Make browser runs observable and bounded.** A browser run previously exposed only
+  `running` plus completed attempts, so a delayed provider response or Go check looked frozen;
+  the page could also lose its poller without stopping the server-side job. Add an explicit live
+  stage, current attempt, start/deadline timestamps, a server-owned whole-run context, and a
+  real `POST /run/{id}/cancel` path. Do not relabel a user cancellation or configured whole-run
+  deadline as a candidate failure. On ambiguous poll failure, keep the start action disabled and
+  reconnect rather than orphaning a run in the UI; ignore callbacks tied to an earlier run.
+  Verification (2026-07-18): `go build ./...`, `go test ./...`, server cancel-route tests, and
+  run-store provider-wait/verifier/cancel/timeout tests passed. No live provider call was needed.
 
 ### Medium
 *None yet.*

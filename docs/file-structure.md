@@ -54,9 +54,9 @@ that owns it.
 F1 is complete: a configured provider returned one real, non-empty completion on 2026-07-18.
 `.env` is a local, Git-ignored copy of `.env.example`; source it to provide provider variables
 to the live smoke test. C3, F2, F3, and F4 provide the authored-oracle loop. F7 stores live
-snapshots, F8 serves the small local API, and F9 embeds the comparison-first browser page. The
-fixed split-cents oracle currently lives in `cmd/repair/main.go`; task folders and generated
-oracles remain future work.
+snapshots plus each browser run's deadline/cancel lifecycle, F8 serves the small local API, and
+F9 embeds the comparison-first browser page. The fixed split-cents oracle currently lives in
+`cmd/repair/main.go`; task folders and generated oracles remain future work.
 
 ## Target Structure
 

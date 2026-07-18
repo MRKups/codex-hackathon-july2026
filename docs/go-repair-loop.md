@@ -130,28 +130,36 @@ In F4, `Task.TestCode` is the fixed authored oracle and **must never enter a cod
 ### F15 oracle-mode extension (planned)
 
 F15 adds `OracleMode` (`authored` / `generated`) and `Task.Oracle`. In generated mode the loop
-will resolve and freeze `TestCode` before attempt 1. F7 has already frozen the `Run` JSON shape
-below, including fields reserved for that later extension:
+will resolve and freeze `TestCode` before attempt 1. The current `Run` JSON shape includes fields
+reserved for that later extension and the live lifecycle fields used by the browser:
 
 ```go
 package run
 
-import "codex-hackathon-july2026/internal/domain"
+import (
+	"time"
+
+	"codex-hackathon-july2026/internal/domain"
+)
 
 // One run of the loop over one task. This is what the web layer stores and
 // serves. Attempts grows as the loop progresses, so a poller sees it fill up.
 type Run struct {
-	ID          string           `json:"id"`
-	Task        string           `json:"task"`        // task name, for the UI header
-	Spec        string           `json:"spec"`        // shown so the audience sees what's being solved
-	Signature   string           `json:"signature"`   // pinned API, shown with the spec
-	Oracle      string           `json:"oracle"`      // "authored" | "generated"
-	TestCode    string           `json:"testCode"`    // the frozen oracle, shown beside the spec
-	MaxAttempts int              `json:"maxAttempts"` // injected budget for this run
-	Status      Status           `json:"status"`      // running | passed | gaveup | infrastructurefailed | oraclefailed
-	FailureMode string           `json:"failureMode"` // "" | "varied" | "persistent" — set when gaveup
-	Error       string           `json:"error"`       // terminal infrastructure/oracle failure only
-	Attempts    []domain.Attempt `json:"attempts"`    // appended to live, as each attempt finishes
+	ID             string           `json:"id"`
+	Task           string           `json:"task"`           // task name, for the UI header
+	Spec           string           `json:"spec"`           // shown so the audience sees what's being solved
+	Signature      string           `json:"signature"`      // pinned API, shown with the spec
+	Oracle         string           `json:"oracle"`         // "authored" | "generated"
+	TestCode       string           `json:"testCode"`       // the frozen oracle, shown beside the spec
+	MaxAttempts    int              `json:"maxAttempts"`    // injected budget for this run
+	Status         Status           `json:"status"`         // running | passed | gaveup | canceled | timedout | infrastructurefailed | oraclefailed
+	Stage          Phase            `json:"stage"`          // starting | waitingforprovider | verifying | canceling | complete
+	CurrentAttempt int              `json:"currentAttempt"` // active attempt while running
+	StartedAt      time.Time        `json:"startedAt"`
+	DeadlineAt     time.Time        `json:"deadlineAt"`
+	FailureMode    string           `json:"failureMode"`    // "" | "varied" | "persistent" — set when gaveup
+	Error          string           `json:"error"`          // terminal infrastructure/oracle/timeout detail
+	Attempts       []domain.Attempt `json:"attempts"`       // appended to live, as each attempt finishes
 }
 ```
 
@@ -465,22 +473,26 @@ every disagreement. For the hackathon, tune only enough to make the flow clear a
 
 **Phase 2 — State.** *(implemented F7)*
 `run.Store.StartRun(task)` launches `Repair` in a goroutine and returns a run ID immediately.
-Its synchronous reporter appends completed attempts under a mutex; `GetRun` returns a copy so
-the HTTP encoder never races with mutation. State is process-local and in-memory. The JSON shape
-above is frozen, with `failureMode` and `oraclefailed` reserved for F18/F15.
+Each browser run owns a deadline-bounded context and a private cancel function. Its synchronous
+reporter appends completed attempts under a mutex; `GetRun` returns a copy so the HTTP encoder
+never races with mutation. The snapshot reports `starting`, `waitingforprovider`, `verifying`,
+or `canceling` before its terminal `complete` stage, so an active request is not mistaken for a
+frozen page. State is process-local and in-memory; `failureMode` and `oraclefailed` remain
+reserved for F18/F15.
 
 **Phase 3 — Web server.** *(implemented F8)*
-`net/http` serves the injected fixed authored task, starts runs, and returns snapshots. The
-handler returns while the goroutine does the provider and verifier work; the browser polls.
-There is no task-selection request body until F6/F12.
+`net/http` serves the injected fixed authored task, starts runs, cancels live runs, and returns
+snapshots. The handler returns while the goroutine does the provider and verifier work; the
+browser polls. There is no task-selection request body until F6/F12.
 
 **Phase 4 — The UI.** *(implemented F9)*
 One embedded HTML file with vanilla JS polls every ~500ms and redraws real run snapshots. The
 fixed authored oracle and task are visible before a provider call. The main wide-screen view is
 three panes: a rejected candidate, its raw verifier feedback, and a later candidate. It renders
 model text via `textContent`, offers attempt selectors, and can download terminal run JSON.
-First-attempt passes and exhausted budgets are shown honestly; no live red → green provider run
-is claimed unless one is actually observed.
+First-attempt passes and exhausted budgets are shown honestly; cancellation and a whole-run
+timeout are separate outcomes rather than code verdicts. No live red → green provider run is
+claimed unless one is actually observed.
 
 **Phase 5 — Stretch.** *(only if the above is solid)*
 Diff between consecutive attempts (highlight what changed — "watch it reason toward correct"). SSE instead of polling so attempts stream the instant they land. Let the user type a task in the UI. **Property tests as the check** instead of examples — a stronger oracle, and the more novel angle. SQLite so runs survive a restart (your OpenLoop already proved this pattern).
@@ -509,14 +521,22 @@ The one contract everything agrees on — deliberately tiny:
 ```
 GET  /task      → fixed authored task context (spec, signature, frozen test source)
 POST /run       → 202 { "id": "run_abc" } // starts the injected fixed demo task immediately
+POST /run/{id}/cancel → 202 { "id": "run_abc" } // requests cancellation while the run is live
 GET  /run/{id}  → 200 Run                  // poll this ~2x/sec
 ```
 
-Unknown run IDs return 404 JSON. The UI reads the fixed task before a provider call, then polls
-`GET /run/{id}` and redraws `Attempts` each tick. When `Status` leaves `"running"`, it stops
-polling and shows green on `passed`, red on `gaveup`, and neutral on
-`infrastructurefailed` or the F15/F16-reserved `oraclefailed`. `FailureMode` is reserved until
-F18.
+Unknown run IDs return 404 JSON; cancellation after a terminal result returns 409. The UI reads
+the fixed task before a provider call, then polls `GET /run/{id}` and redraws `Attempts` each
+tick. It also renders `Stage`, `CurrentAttempt`, and elapsed time against `DeadlineAt` while
+live. When `Status` leaves `"running"`, it stops polling and shows green on `passed`, red on
+`gaveup`, blue on `canceled`, and neutral on `timedout`, `infrastructurefailed`, or the
+F15/F16-reserved `oraclefailed`. `FailureMode` is reserved until F18.
+
+`LLM_TIMEOUT` bounds one provider completion and `-verifier-timeout` bounds one Go
+verification. The browser-only `-run-timeout` flag bounds the whole repair run (90 seconds by
+default). Expiry of that outer context is `timedout`; it is distinct from a provider failure and
+from a verifier-owned failed attempt timeout. The page can also request cancellation through the
+same outer context.
 
 **UI stack: one static HTML file, vanilla JS, served via Go `embed`.** The comparison-first
 layout places a rejected candidate, exact verifier feedback, and a later candidate side by side.

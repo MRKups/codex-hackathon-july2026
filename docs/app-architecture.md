@@ -51,7 +51,7 @@ in `internal/domain`. The configured-provider smoke test returned non-empty text
 F4 coder-only `Repair` loop. `internal/run` owns asynchronous in-memory snapshots; `internal/server`
 exposes the small polling API and embeds the single-file browser UI. `cmd/repair` runs one
 hardcoded split-cents task in the terminal or serves it through `-serve`, distinguishing pass,
-exhaustion, and provider/verifier failure.
+exhaustion, cancellation, total-run timeout, and provider/verifier failure.
 
 The two-oracle-mode design (`authored` / `generated`) was adopted on 2026-07-18, after F1/C3
 and before F2. `internal/domain` predates it and still needs the `OracleMode` field added —
@@ -70,7 +70,7 @@ in Phase 1 so the coder loop is proven against a known-good fixture first.
 | Verifier | `go build` + `go test` in a temp module |
 | Oracle (F15) | `authored` (human test file) or `generated` (test-writer context, spec + signature only), frozen before attempt 1 |
 | Run state | in-memory `map[string]*Run` + mutex (SQLite via `modernc.org/sqlite` as a stretch) |
-| Concurrency | one goroutine per run; status exposed for polling |
+| Concurrency | one goroutine per run; each browser run owns a cancelable deadline context and exposes live state for polling |
 | Isolation | one injected verifier timeout across `go build` and `go test` — no sandbox |
 | Build / deploy | `go build` → single static binary |
 
@@ -90,8 +90,8 @@ attempts. Nothing imports upward; no cycles.
 | `internal/prompt` | F4 provides `FirstPrompt(spec, signature)`, `RepairPrompt(spec, signature, previousCode, verifierOutput)`, and `ExtractGoCode(raw)`. Pure string work, no I/O and no `domain` import. F15 adds `TestPrompt(spec, signature)` with no candidate-code parameter. |
 | `internal/repair` | F3 verifier + F4 coder-only loop: `Repair`, `generate`, `runTests`, and an optional synchronous attempt reporter. It owns temp-module verification (`go build`, then `go test`) and retry logic; imports `domain`, `llm`, and `prompt`. F15 adds oracle resolution and test-writer use. |
 | `internal/task` | F6 loader for task files. It returns `domain.Task`; it does not own the shared type. A task directory without `solution_test.go` loads as `OracleGenerated`; one with it loads as `OracleAuthored`. |
-| `internal/run` | Orchestration + state. Launches `Repair` in a goroutine, appends attempts to a `Run` as they land, answers "status of run X." In-memory. |
-| `internal/server` | HTTP handlers (start a run, poll a run) plus the embedded `index.html` browser asset. Thin: it injects the fixed demo task but does not contain repair logic. |
+| `internal/run` | Orchestration + state. Launches `Repair` in a goroutine under a store-owned deadline, appends attempts to a `Run` as they land, exposes the active stage, and can cancel one live run. In-memory. |
+| `internal/server` | HTTP handlers (start, poll, and cancel a run) plus the embedded `index.html` browser asset. Thin: it injects the fixed demo task but does not contain repair logic. |
 
 ### Provider configuration
 
@@ -142,32 +142,42 @@ type Attempt struct {
 ```
 
 F15 adds `OracleMode` and `Task.Oracle`, then resolves a generated `TestCode` before any coder
-call. F7 has frozen the `Run` JSON contract below, including fields reserved for those later
-features:
+call. The current `Run` JSON contract includes fields reserved for those later features and the
+live lifecycle fields needed by the browser:
 
 ```go
 package run
 
-import "codex-hackathon-july2026/internal/domain"
+import (
+	"time"
+
+	"codex-hackathon-july2026/internal/domain"
+)
 
 type Run struct {
-	ID          string           `json:"id"`
-	Task        string           `json:"task"`
-	Spec        string           `json:"spec"`
-	Signature   string           `json:"signature"`
-	Oracle      string           `json:"oracle"`      // "authored" | "generated"
-	TestCode    string           `json:"testCode"`    // the frozen oracle, for display
-	MaxAttempts int              `json:"maxAttempts"`
-	Status      Status           `json:"status"`      // running | passed | gaveup | infrastructurefailed | oraclefailed
-	FailureMode string           `json:"failureMode"` // "" | "varied" | "persistent"
-	Error       string           `json:"error"`       // terminal infrastructure/oracle failure only
-	Attempts    []domain.Attempt `json:"attempts"`
+	ID             string           `json:"id"`
+	Task           string           `json:"task"`
+	Spec           string           `json:"spec"`
+	Signature      string           `json:"signature"`
+	Oracle         string           `json:"oracle"`      // "authored" | "generated"
+	TestCode       string           `json:"testCode"`    // the frozen oracle, for display
+	MaxAttempts    int              `json:"maxAttempts"`
+	Status         Status           `json:"status"`      // running | passed | gaveup | canceled | timedout | infrastructurefailed | oraclefailed
+	Stage          Phase            `json:"stage"`       // starting | waitingforprovider | verifying | canceling | complete
+	CurrentAttempt int              `json:"currentAttempt"`
+	StartedAt      time.Time        `json:"startedAt"`
+	DeadlineAt     time.Time        `json:"deadlineAt"`
+	FailureMode    string           `json:"failureMode"` // "" | "varied" | "persistent"
+	Error          string           `json:"error"`       // terminal infrastructure/oracle/timeout detail
+	Attempts       []domain.Attempt `json:"attempts"`
 }
 ```
 
 Current F7 runs set `Oracle` to `"authored"`. `oraclefailed` and `failureMode` are reserved for
-the F15/F16 and F18 extensions respectively; `infrastructurefailed` is already used when the
-provider or harness stops the run without a code verdict.
+the F15/F16 and F18 extensions respectively. `infrastructurefailed` is used when the provider or
+harness stops the run without a code verdict; `canceled` and `timedout` are separate, explicit
+browser-run outcomes. `Stage` is meaningful only while `Status` is `running`; terminal snapshots
+use `complete`.
 
 ## The Loop
 
@@ -212,13 +222,16 @@ prerequisite for the hackathon demo.
 ```
 GET  /task      → 200 fixed authored task context
 POST /run       → 202 { "id": "run_abc" } // starts the injected fixed demo task immediately
+POST /run/{id}/cancel → 202 { "id": "run_abc" } // requests cancellation of a live run
 GET  /run/{id}  → 200 Run                  // poll ~2x/sec; stop when Status != "running"
 ```
 
-Unknown IDs return 404 JSON. API responses are `Cache-Control: no-store`. The shipped page is
-comparison-first: it displays the frozen authored oracle above the exact candidate source and
-raw verifier feedback, then compares a rejected candidate with a later candidate when available.
-It renders untrusted source/output with DOM text nodes, never HTML.
+Unknown IDs return 404 JSON; cancel requests after a terminal outcome return 409. API responses
+are `Cache-Control: no-store`. The shipped page is comparison-first: it displays the frozen
+authored oracle above the exact candidate source and raw verifier feedback, then compares a
+rejected candidate with a later candidate when available. While the run is live, it renders the
+actual provider-wait, verification, or cancellation stage with elapsed time against the
+server-owned deadline. It renders untrusted source/output with DOM text nodes, never HTML.
 
 ## Persistence
 
@@ -249,6 +262,12 @@ non-empty authored oracle before calling the provider. Then it follows this cont
   In generated mode, an empty extraction or a test file that fails preflight is retried up to the
   oracle cap; exhausting it returns an `oraclefailed` error before any coder call is made. An
   oracle fault is never reported as a failed attempt.
+
+For the browser path, `run.Store` provides that caller context. `-run-timeout` defaults to 90
+seconds and is a cap on the whole generate → verify → repair run, independent of `LLM_TIMEOUT`
+for one completion and `-verifier-timeout` for one Go verification. A user cancellation produces
+`canceled`; expiry of the outer cap produces `timedout`; a provider's own timeout remains
+`infrastructurefailed`.
 
 ## Deployment
 

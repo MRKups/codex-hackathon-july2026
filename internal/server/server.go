@@ -35,6 +35,19 @@ func New(store *run.Store, task domain.Task) (http.Handler, error) {
 		}
 		writeJSON(writer, http.StatusAccepted, startResponse{ID: id})
 	})
+	mux.HandleFunc("POST /run/{id}/cancel", func(writer http.ResponseWriter, request *http.Request) {
+		id := strings.TrimSpace(request.PathValue("id"))
+		found, canceled := store.CancelRun(id)
+		if !found {
+			writeJSON(writer, http.StatusNotFound, errorResponse{Error: "run not found"})
+			return
+		}
+		if !canceled {
+			writeJSON(writer, http.StatusConflict, errorResponse{Error: "run is no longer cancelable"})
+			return
+		}
+		writeJSON(writer, http.StatusAccepted, startResponse{ID: id})
+	})
 	mux.HandleFunc("GET /run/{id}", func(writer http.ResponseWriter, request *http.Request) {
 		id := strings.TrimSpace(request.PathValue("id"))
 		snapshot, found := store.GetRun(id)

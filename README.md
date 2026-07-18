@@ -83,12 +83,19 @@ This is the recommended hackathon presentation path:
 
 ```bash
 source .env
-go run ./cmd/repair -serve -attempts 3 -verifier-timeout 10s
+go run ./cmd/repair -serve -attempts 3 -verifier-timeout 10s -run-timeout 90s
 ```
 
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080) and click **Run live repair**. To use a
 different free local address, add `-addr 127.0.0.1:8090` (the default is `127.0.0.1:8080`).
 Press `Ctrl-C` in the terminal to stop the server.
+
+While a run is live, the page says whether it is waiting for the provider or Go is verifying a
+candidate, shows elapsed time against the run limit, and offers **Cancel run**. The three limits
+serve different purposes: `LLM_TIMEOUT` bounds one provider completion, `-verifier-timeout`
+bounds one `go build`/`go test` verification, and `-run-timeout` bounds the whole browser run
+(90 seconds by default). A canceled or timed-out run is shown as such; neither is presented as a
+verdict on the candidate code.
 
 ### Notes for judges
 
@@ -102,7 +109,7 @@ the next repair prompt. If a later card is green, its source passed both `go bui
 against that same oracle.
 
 After a terminal result, **Download run JSON** saves the spec, frozen oracle, exact candidates,
-verifier outputs, and final state as a portable record of the run.
+verifier outputs, phase/timing data, and final state as a portable record of the run.
 
 A live provider can legitimately solve this small task on its first attempt, or can exhaust the
 attempt budget. The UI shows either result honestly; it does not manufacture a red → green story.

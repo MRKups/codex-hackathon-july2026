@@ -189,22 +189,30 @@ type Task struct {
 ```
 
 ```go
-// internal/run — frozen at F7, even though F15/F18 land later.
-// Adding fields after the freeze breaks the browser contract.
+// internal/run — browser lifecycle fields added by B1 are part of the current contract,
+// alongside fields reserved for F15/F18.
 type Run struct {
-    ID          string           `json:"id"`
-    Task        string           `json:"task"`
-    Spec        string           `json:"spec"`
-    Signature   string           `json:"signature"`
-    Oracle      string           `json:"oracle"`      // NEW: "authored" | "generated"
-    TestCode    string           `json:"testCode"`    // NEW: the frozen oracle, for display
-    MaxAttempts int              `json:"maxAttempts"`
-    Status      Status           `json:"status"`      // running | passed | gaveup | infrastructurefailed | oraclefailed
-    FailureMode string           `json:"failureMode"` // NEW: "" | "varied" | "persistent"
-    Error       string           `json:"error"`
-    Attempts    []domain.Attempt `json:"attempts"`
+    ID             string           `json:"id"`
+    Task           string           `json:"task"`
+    Spec           string           `json:"spec"`
+    Signature      string           `json:"signature"`
+    Oracle         string           `json:"oracle"`      // NEW: "authored" | "generated"
+    TestCode       string           `json:"testCode"`    // NEW: the frozen oracle, for display
+    MaxAttempts    int              `json:"maxAttempts"`
+    Status         Status           `json:"status"`      // running | passed | gaveup | canceled | timedout | infrastructurefailed | oraclefailed
+    Stage          Phase            `json:"stage"`       // starting | waitingforprovider | verifying | canceling | complete
+    CurrentAttempt int              `json:"currentAttempt"`
+    StartedAt      time.Time        `json:"startedAt"`
+    DeadlineAt     time.Time        `json:"deadlineAt"`
+    FailureMode    string           `json:"failureMode"` // NEW: "" | "varied" | "persistent"
+    Error          string           `json:"error"`
+    Attempts       []domain.Attempt `json:"attempts"`
 }
 ```
+
+The lifecycle fields do not alter the blind-oracle premise; they make the browser's account of a
+live run honest. `Stage` is meaningful while `Status` is `running`, and terminal runs use
+`complete`. `canceled` and `timedout` are operational outcomes, never claims about the candidate.
 
 `TestCode` sits on the `Run` because in `generated` mode the oracle is a **result** of the run,
 not an input to it.

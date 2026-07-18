@@ -108,6 +108,7 @@
         opacity: 0.6;
       }
 
+      #cancelButton[hidden],
       #downloadButton[hidden] {
         display: none;
       }
@@ -144,8 +145,15 @@
         background: #fef2f2;
       }
 
+      .run-status.canceled {
+        color: #1e40af;
+        border-color: #93c5fd;
+        background: #eff6ff;
+      }
+
       .run-status.infrastructurefailed,
-      .run-status.oraclefailed {
+      .run-status.oraclefailed,
+      .run-status.timedout {
         color: #92400e;
         border-color: #fcd34d;
         background: #fffbeb;
@@ -368,6 +376,7 @@
         </div>
         <div class="actions">
           <button id="downloadButton" type="button" hidden>Download run JSON</button>
+          <button id="cancelButton" type="button" hidden>Cancel run</button>
           <button class="primary" id="runButton" type="button">Run live repair</button>
         </div>
       </header>
@@ -450,7 +459,9 @@
         "use strict";
 
         var state = {
+          cancelRequested: false,
           leftAttempt: null,
+          pollGeneration: 0,
           pollTimer: null,
           rightAttempt: null,
           run: null,
@@ -458,6 +469,7 @@
         };
 
         var runButton = document.getElementById("runButton");
+        var cancelButton = document.getElementById("cancelButton");
         var downloadButton = document.getElementById("downloadButton");
         var runStatus = document.getElementById("runStatus");
         var runSummary = document.getElementById("runSummary");
@@ -494,6 +506,7 @@
         };
 
         runButton.addEventListener("click", startRun);
+        cancelButton.addEventListener("click", cancelRun);
         downloadButton.addEventListener("click", downloadRun);
         leftSelect.addEventListener("change", function () {
           state.leftAttempt = Number(leftSelect.value);
@@ -522,16 +535,21 @@
 
         function startRun() {
           stopPolling();
+          var startGeneration = state.pollGeneration;
           state.leftAttempt = null;
           state.rightAttempt = null;
           state.run = null;
           state.runID = null;
+          state.cancelRequested = false;
           downloadButton.hidden = true;
+          cancelButton.hidden = true;
+          cancelButton.disabled = false;
+          cancelButton.textContent = "Cancel run";
           runButton.disabled = true;
           runButton.textContent = "Starting…";
           setRunStatus("Starting", "running");
-          runSummary.textContent = "Starting a provider run.";
-          notice.textContent = "Waiting for the first verified candidate.";
+          runSummary.textContent = "Creating a run; waiting for the server to confirm it.";
+          notice.textContent = "No provider request has been confirmed yet.";
           renderComparison();
 
           fetch("/run", {
@@ -541,37 +559,93 @@
           })
             .then(readJSON)
             .then(function (started) {
+              if (state.pollGeneration !== startGeneration) {
+                return;
+              }
+              if (!started || !started.id) {
+                throw new Error("The server accepted the run but did not return a run ID.");
+              }
               state.runID = started.id;
+              cancelButton.hidden = false;
+              cancelButton.disabled = false;
               setRunStatus("Running", "running");
-              runSummary.textContent = "The provider run is active. Attempts appear only after Go verifies them.";
+              runSummary.textContent = "Run " + started.id + " is active. Waiting for its first status update.";
               pollRun();
             })
-            .catch(showStartError);
+            .catch(function (error) {
+              if (state.pollGeneration === startGeneration) {
+                showStartError(error);
+              }
+            });
         }
 
-        function pollRun() {
+        function cancelRun() {
           if (!state.runID) {
             return;
           }
 
-          fetch("/run/" + encodeURIComponent(state.runID), {
+          var runID = state.runID;
+          var cancelGeneration = state.pollGeneration;
+          state.cancelRequested = true;
+          cancelButton.disabled = true;
+          cancelButton.textContent = "Canceling…";
+          setRunStatus("Canceling", "canceling");
+          runSummary.textContent = "Stop requested for " + runID + ". Waiting for the server to finish stopping the current operation.";
+          notice.textContent = "No further candidate will be started after cancellation is accepted.";
+
+          fetch("/run/" + encodeURIComponent(runID) + "/cancel", {
+            method: "POST",
+            headers: { "Accept": "application/json" },
+            cache: "no-store"
+          })
+            .then(readJSON)
+            .catch(function (error) {
+              if (!isCurrentPoll(runID, cancelGeneration)) {
+                return;
+              }
+              if (error.status === 409) {
+                return;
+              }
+              showPollError(error);
+            });
+        }
+
+        function pollRun() {
+          var runID = state.runID;
+          var pollGeneration = state.pollGeneration;
+          if (!runID) {
+            return;
+          }
+
+          fetch("/run/" + encodeURIComponent(runID), {
             headers: { "Accept": "application/json" },
             cache: "no-store"
           })
             .then(readJSON)
             .then(function (run) {
+              if (!isCurrentPoll(runID, pollGeneration)) {
+                return;
+              }
               state.run = run;
               renderRun();
               if (run.status === "running") {
-                state.pollTimer = window.setTimeout(pollRun, 500);
+                schedulePoll(runID, pollGeneration, 500);
                 return;
               }
               stopPolling();
+              state.cancelRequested = false;
+              cancelButton.hidden = true;
+              cancelButton.disabled = false;
+              cancelButton.textContent = "Cancel run";
               runButton.disabled = false;
               runButton.textContent = "Run another repair";
               downloadButton.hidden = false;
             })
-            .catch(showPollError);
+            .catch(function (error) {
+              if (isCurrentPoll(runID, pollGeneration)) {
+                showPollError(error);
+              }
+            });
         }
 
         function readJSON(response) {
@@ -579,23 +653,41 @@
             return response.json().catch(function () {
               return {};
             }).then(function (body) {
-              throw new Error(body.error || "Request failed with status " + response.status);
+              var error = new Error(body.error || "Request failed with status " + response.status);
+              error.status = response.status;
+              throw error;
             });
           }
           return response.json();
         }
 
         function stopPolling() {
+          state.pollGeneration += 1;
           if (state.pollTimer !== null) {
             window.clearTimeout(state.pollTimer);
             state.pollTimer = null;
           }
         }
 
+        function isCurrentPoll(runID, generation) {
+          return state.runID === runID && state.pollGeneration === generation;
+        }
+
+        function schedulePoll(runID, generation, delay) {
+          state.pollTimer = window.setTimeout(function () {
+            if (!isCurrentPoll(runID, generation)) {
+              return;
+            }
+            state.pollTimer = null;
+            pollRun();
+          }, delay);
+        }
+
         function showStartError(error) {
           stopPolling();
           runButton.disabled = false;
           runButton.textContent = "Try again";
+          cancelButton.hidden = true;
           setRunStatus("Start failed", "infrastructurefailed");
           runSummary.textContent = error.message || "The run could not be started.";
           notice.textContent = "No candidate was created.";
@@ -603,11 +695,27 @@
 
         function showPollError(error) {
           stopPolling();
-          runButton.disabled = false;
-          runButton.textContent = "Start another repair";
-          setRunStatus("Connection interrupted", "");
-          runSummary.textContent = "The browser lost contact with the local server; the server-side run may still be active.";
+          if (error.status === 404) {
+            state.runID = null;
+            state.cancelRequested = false;
+            cancelButton.hidden = true;
+            cancelButton.disabled = false;
+            cancelButton.textContent = "Cancel run";
+            runButton.disabled = false;
+            runButton.textContent = "Run another repair";
+            downloadButton.hidden = true;
+            setRunStatus("Run unavailable", "infrastructurefailed");
+            runSummary.textContent = "This server no longer stores the active run. It cannot be resumed from this page.";
+            notice.textContent = error.message || "Start a new run if the server has restarted.";
+            return;
+          }
+
+          runButton.disabled = true;
+          cancelButton.disabled = true;
+          setRunStatus("Connection interrupted", "infrastructurefailed");
+          runSummary.textContent = "This page cannot confirm whether run " + state.runID + " is still active. Reconnecting…";
           notice.textContent = error.message || "The latest run state could not be retrieved.";
+          schedulePoll(state.runID, state.pollGeneration, 1000);
         }
 
         function renderTask(task) {
@@ -624,23 +732,62 @@
           }
 
           renderTask(run);
-          setRunStatus(statusLabel(run.status), run.status);
           if (run.status === "running") {
-            runSummary.textContent = "Attempt " + (run.attempts.length + 1) + " is in progress.";
-            notice.textContent = run.attempts.length === 0
-              ? "Waiting for the first verified candidate."
-              : "Waiting for the next verified candidate.";
+            renderActiveRun(run);
           } else if (run.status === "passed") {
+            setRunStatus("Passed", "passed");
             runSummary.textContent = "A candidate passed both go build and go test against the frozen oracle.";
             notice.textContent = "The run finished successfully.";
           } else if (run.status === "gaveup") {
+            setRunStatus("Gave up", "gaveup");
             runSummary.textContent = "The attempt budget ended without a passing candidate.";
             notice.textContent = "The visible verifier feedback came from the same frozen oracle.";
+          } else if (run.status === "canceled") {
+            setRunStatus("Canceled", "canceled");
+            runSummary.textContent = "Run canceled after " + completedAttemptCount(run) + " completed attempt(s).";
+            notice.textContent = "No further candidate was started.";
+          } else if (run.status === "timedout") {
+            setRunStatus("Timed out", "timedout");
+            runSummary.textContent = run.error || "The configured run time limit ended before a terminal code verdict.";
+            notice.textContent = "This is a run-level timeout, not a candidate verdict.";
           } else {
+            setRunStatus(statusLabel(run.status), run.status);
             runSummary.textContent = run.error || "The run ended without a code verdict.";
             notice.textContent = "This is an infrastructure outcome, not a candidate verdict.";
           }
           renderComparison();
+        }
+
+        function renderActiveRun(run) {
+          var attempt = Number(run.currentAttempt) || completedAttemptCount(run) + 1;
+          var limit = Number(run.maxAttempts) || "?";
+          var timing = runTiming(run);
+
+          if (state.cancelRequested && run.stage !== "canceling") {
+            setRunStatus("Canceling", "canceling");
+            runSummary.textContent = "Cancellation requested for attempt " + attempt + ". Waiting for the server to confirm it." + timing;
+            notice.textContent = "The page is still observing the run until the server returns a terminal state.";
+          } else if (run.stage === "waitingforprovider") {
+            setRunStatus("Waiting for candidate", "running");
+            runSummary.textContent = "Attempt " + attempt + " of " + limit + ". Waiting for the configured provider to return a candidate." + timing;
+            notice.textContent = "Candidate source and verifier output appear only after Go finishes checking this attempt.";
+          } else if (run.stage === "verifying") {
+            setRunStatus("Verifying candidate", "running");
+            runSummary.textContent = "Attempt " + attempt + " of " + limit + ". A candidate was received; Go is building and testing it against the frozen oracle." + timing;
+            notice.textContent = "The candidate source and exact verifier output will appear when this check completes.";
+          } else if (run.stage === "canceling") {
+            setRunStatus("Canceling", "canceling");
+            runSummary.textContent = "Stop requested for attempt " + attempt + ". Waiting for the server to finish stopping the current operation." + timing;
+            notice.textContent = "No further candidate will be started after cancellation is accepted.";
+          } else {
+            setRunStatus("Starting", "running");
+            runSummary.textContent = "Run accepted. Preparing attempt " + attempt + " of " + limit + "." + timing;
+            notice.textContent = "Waiting for the server to begin the first provider request.";
+          }
+
+          cancelButton.hidden = false;
+          cancelButton.disabled = state.cancelRequested || run.stage === "canceling";
+          cancelButton.textContent = cancelButton.disabled ? "Canceling…" : "Cancel run";
         }
 
         function renderComparison() {
@@ -656,9 +803,15 @@
           var attempts = Array.isArray(run.attempts) ? run.attempts : [];
           if (attempts.length === 0) {
             controls.hidden = true;
-            clearAttemptPane(panes.left, "Candidate source", "No verified candidate has been recorded yet.", "Waiting for Go verification.");
+            if (run.status !== "running") {
+              clearAttemptPane(panes.left, "Candidate source", "No candidate source was completed before this run ended.", "No candidate source was recorded.");
+              renderFeedback(null, null);
+              clearAttemptPane(panes.right, "Later candidate", "No later candidate was recorded.", "No later candidate source was recorded.");
+              return;
+            }
+            clearAttemptPane(panes.left, "Candidate source", pendingCandidateNote(run), pendingCandidateCode(run));
             renderFeedback(null, null);
-            clearAttemptPane(panes.right, "Later candidate", "No later candidate has been recorded yet.", "Waiting for Go verification.");
+            clearAttemptPane(panes.right, "Later candidate", "No later candidate has been recorded yet.", pendingCandidateCode(run));
             return;
           }
 
@@ -794,10 +947,61 @@
             running: "Running",
             passed: "Passed",
             gaveup: "Gave up",
+            canceled: "Canceled",
+            timedout: "Timed out",
             infrastructurefailed: "Infrastructure failure",
             oraclefailed: "Oracle failure"
           };
           return labels[status] || "Unknown state";
+        }
+
+        function completedAttemptCount(run) {
+          return Array.isArray(run.attempts) ? run.attempts.length : 0;
+        }
+
+        function pendingCandidateNote(run) {
+          if (run.stage === "verifying") {
+            return "A candidate was received and is being checked by Go.";
+          }
+          if (run.stage === "canceling") {
+            return "Stopping the current operation before another candidate can be recorded.";
+          }
+          return "Waiting for the provider to return a candidate.";
+        }
+
+        function pendingCandidateCode(run) {
+          if (run.stage === "verifying") {
+            return "Candidate received. Waiting for Go verification.";
+          }
+          if (run.stage === "canceling") {
+            return "Cancellation requested.";
+          }
+          return "Waiting for provider response.";
+        }
+
+        function runTiming(run) {
+          var started = Date.parse(run.startedAt || "");
+          var deadline = Date.parse(run.deadlineAt || "");
+          if (Number.isNaN(started)) {
+            return "";
+          }
+
+          var elapsed = Math.max(0, Date.now() - started);
+          var total = Number.isNaN(deadline) ? 0 : Math.max(0, deadline - started);
+          if (total > 0) {
+            return " " + formatDuration(elapsed) + " elapsed of " + formatDuration(total) + ".";
+          }
+          return " " + formatDuration(elapsed) + " elapsed.";
+        }
+
+        function formatDuration(milliseconds) {
+          var seconds = Math.floor(milliseconds / 1000);
+          var minutes = Math.floor(seconds / 60);
+          var remainingSeconds = seconds % 60;
+          if (minutes > 0) {
+            return minutes + "m " + remainingSeconds + "s";
+          }
+          return remainingSeconds + "s";
         }
 
         function downloadRun() {

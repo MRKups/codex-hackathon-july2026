@@ -20,15 +20,17 @@ import (
 func main() {
 	var address string
 	var maxAttempts int
+	var runTimeout time.Duration
 	var serve bool
 	var verifierTimeout time.Duration
 	flag.StringVar(&address, "addr", "127.0.0.1:8080", "address for the browser demo server")
 	flag.IntVar(&maxAttempts, "attempts", 3, "maximum number of coder attempts")
+	flag.DurationVar(&runTimeout, "run-timeout", 90*time.Second, "maximum duration of one browser repair run")
 	flag.BoolVar(&serve, "serve", false, "serve the browser demo instead of running once in the terminal")
 	flag.DurationVar(&verifierTimeout, "verifier-timeout", 10*time.Second, "timeout for one candidate verification")
 	flag.Parse()
 	if flag.NArg() != 0 {
-		fmt.Fprintf(os.Stderr, "usage: %s [-serve] [-addr ADDRESS] [-attempts N] [-verifier-timeout DURATION]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "usage: %s [-serve] [-addr ADDRESS] [-attempts N] [-run-timeout DURATION] [-verifier-timeout DURATION]\n", os.Args[0])
 		os.Exit(2)
 	}
 	if maxAttempts <= 0 {
@@ -36,6 +38,9 @@ func main() {
 	}
 	if verifierTimeout <= 0 {
 		exitFailure("configuration error", fmt.Errorf("verifier timeout must be greater than zero"))
+	}
+	if runTimeout <= 0 {
+		exitFailure("configuration error", fmt.Errorf("run timeout must be greater than zero"))
 	}
 	if strings.TrimSpace(address) == "" {
 		exitFailure("configuration error", fmt.Errorf("server address must not be empty"))
@@ -50,7 +55,7 @@ func main() {
 		exitFailure("configuration error", err)
 	}
 	if serve {
-		serveBrowser(address, coder, splitCentsTask(), maxAttempts, verifierTimeout)
+		serveBrowser(address, coder, splitCentsTask(), maxAttempts, verifierTimeout, runTimeout)
 		return
 	}
 
@@ -73,8 +78,8 @@ func main() {
 	fmt.Printf("gave up after %d attempt(s)\n", final.N)
 }
 
-func serveBrowser(address string, coder llm.LLM, task domain.Task, maxAttempts int, verifierTimeout time.Duration) {
-	store, err := run.NewStore(coder, maxAttempts, verifierTimeout)
+func serveBrowser(address string, coder llm.LLM, task domain.Task, maxAttempts int, verifierTimeout, runTimeout time.Duration) {
+	store, err := run.NewStore(coder, maxAttempts, verifierTimeout, runTimeout)
 	if err != nil {
 		exitFailure("configuration error", err)
 	}

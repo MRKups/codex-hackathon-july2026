@@ -20,7 +20,7 @@ func TestNewServesBrowserAndRunAPI(t *testing.T) {
 func Increment(value int) int {
 	return value + 1
 }
-`}, 1, 10*time.Second)
+`}, 1, 10*time.Second, time.Minute)
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
@@ -82,7 +82,7 @@ func Increment(value int) int {
 }
 
 func TestRunAPIRejectsUnknownRun(t *testing.T) {
-	store, err := run.NewStore(staticLLM{}, 1, time.Second)
+	store, err := run.NewStore(staticLLM{}, 1, time.Second, time.Minute)
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
@@ -95,6 +95,62 @@ func TestRunAPIRejectsUnknownRun(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/run/missing", nil))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("GET /run/missing status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestRunAPICancelsActiveRun(t *testing.T) {
+	model := &blockingLLM{started: make(chan struct{})}
+	store, err := run.NewStore(model, 1, time.Second, time.Minute)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	handler, err := New(store, incrementTask())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	start := httptest.NewRecorder()
+	handler.ServeHTTP(start, httptest.NewRequest(http.MethodPost, "/run", nil))
+	if start.Code != http.StatusAccepted {
+		t.Fatalf("POST /run status = %d, want %d; body = %s", start.Code, http.StatusAccepted, start.Body.String())
+	}
+	var started startResponse
+	if err := json.NewDecoder(start.Body).Decode(&started); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+	if started.ID == "" {
+		t.Fatal("POST /run returned an empty id")
+	}
+
+	select {
+	case <-model.started:
+	case <-time.After(15 * time.Second):
+		t.Fatal("provider call did not start")
+	}
+
+	cancel := httptest.NewRecorder()
+	handler.ServeHTTP(cancel, httptest.NewRequest(http.MethodPost, "/run/"+started.ID+"/cancel", nil))
+	if cancel.Code != http.StatusAccepted {
+		t.Fatalf("POST /run/{id}/cancel status = %d, want %d; body = %s", cancel.Code, http.StatusAccepted, cancel.Body.String())
+	}
+	got := waitForRun(t, handler, started.ID)
+	if got.Status != run.StatusCanceled {
+		t.Fatalf("canceled run status = %q, want %q; error = %q", got.Status, run.StatusCanceled, got.Error)
+	}
+	if got.Stage != run.PhaseComplete {
+		t.Fatalf("canceled run stage = %q, want %q", got.Stage, run.PhaseComplete)
+	}
+
+	terminalCancel := httptest.NewRecorder()
+	handler.ServeHTTP(terminalCancel, httptest.NewRequest(http.MethodPost, "/run/"+started.ID+"/cancel", nil))
+	if terminalCancel.Code != http.StatusConflict {
+		t.Fatalf("POST /run/{id}/cancel after terminal state = %d, want %d", terminalCancel.Code, http.StatusConflict)
+	}
+
+	missingCancel := httptest.NewRecorder()
+	handler.ServeHTTP(missingCancel, httptest.NewRequest(http.MethodPost, "/run/missing/cancel", nil))
+	if missingCancel.Code != http.StatusNotFound {
+		t.Fatalf("POST /run/missing/cancel status = %d, want %d", missingCancel.Code, http.StatusNotFound)
 	}
 }
 
@@ -136,6 +192,16 @@ func (model staticLLM) Complete(_ context.Context, _ string) (string, error) {
 		return "", errors.New("unexpected completion request")
 	}
 	return model.response, nil
+}
+
+type blockingLLM struct {
+	started chan struct{}
+}
+
+func (model *blockingLLM) Complete(ctx context.Context, _ string) (string, error) {
+	close(model.started)
+	<-ctx.Done()
+	return "", ctx.Err()
 }
 
 func incrementTask() domain.Task {
