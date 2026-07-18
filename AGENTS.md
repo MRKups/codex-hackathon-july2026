@@ -13,11 +13,20 @@ Keep this file short. A bloated rules file gets partially ignored.
   web framework, ORM, DI container, or other heavy dependency. Adding any other dependency
   requires a note in `docs/tracker.md` explaining why.
 
-- **The code-writer never writes the tests. This is the point of the project.** For any
-  task the loop solves, the tests are human-authored and fixed *before* generation, and
-  they are fed to the loop as a given — never generated in the same context as the code.
-  If code and its checking tests ever come from one model context, the guarantee is void
-  and the work must be redone.
+- **The oracle is written blind to the code. This is the point of the project.** The tests
+  that judge a solution must be produced by something that has never seen that solution.
+  Two legal sources: **authored** (a human writes them) or **generated** (a separate
+  test-writer context reads only the spec + signature). Both are fixed *before* the repair
+  loop starts and frozen for the whole run. Illegal, always: one context producing both code
+  and tests; a test-writer that sees candidate code; regenerating the oracle mid-run to make
+  a failing solution pass. If any of those happen the guarantee is void and the work must be
+  redone.
+
+- **Build the end-to-end blind-oracle loop first.** The task spec is the shared input; in
+  generated mode, disagreement can expose different readings of it. That is a useful
+  diagnostic, not a verdict on the spec or either model. Never resolve a failing run by editing
+  its frozen oracle; inspect the task after the run, without making research analysis a
+  prerequisite for a working demo.
 
 - **Respect the dependency direction.** `web → server → run → repair → { prompt, llm }`,
   with `task` feeding `run`. No package imports "upward" and no import cycles. Each
@@ -35,9 +44,10 @@ Keep this file short. A bloated rules file gets partially ignored.
 - **`prompt/` stays pure.** No I/O in the prompt package — it turns data into strings and
   back. Loop quality lives here, so it must stay trivially testable in isolation.
 
-- **Config from env/flags, never hardcoded.** API key, base URL, model name, port, attempt
+- **Config from env/flags, never hardcoded.** API key, base URL, model names, port, attempt
   cap, and timeout are all injected. Never commit a secret; never hardcode an endpoint or
-  model string in a package.
+  model string in a package. When F17 adds the generated-oracle role, coder and test-writer
+  models are configured separately so they can be decorrelated — see `docs/app-architecture.md`.
 
 - **Formatting is canonical.** `gofmt` and `go vet` must be clean before anything is
   "done." Canonical formatting keeps generated diffs small and reviewable.
