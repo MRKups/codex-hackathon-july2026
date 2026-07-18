@@ -15,6 +15,8 @@ that owns it.
 ├── README.md
 ├── go.mod                        # Module codex-hackathon-july2026 + Go 1.26
 ├── internal/
+│   ├── domain/                   # Shared Task and Attempt values; imports nothing [C3]
+│   │   └── domain.go
 │   └── llm/                      # Provider boundary + OpenAI-compatible client [F1]
 │       ├── llm.go
 │       ├── client.go
@@ -29,8 +31,8 @@ that owns it.
 
 F1 is complete: a configured provider returned one real, non-empty completion on 2026-07-18.
 `.env` is a local, Git-ignored copy of `.env.example`; source it to provide provider variables
-to the live smoke test. C3 is the next prerequisite; every path outside `internal/llm` in the
-target tree is still planned.
+to the live smoke test. C3 is complete: `internal/domain` owns the shared data without creating
+an upward import path. F2 is next; every other target path remains planned.
 
 ## Target Structure
 
@@ -52,16 +54,18 @@ until their tracker item starts.
 │       └── main.go               # Entry point: parse flags, wire deps, run CLI or -serve  [F4/F8]
 │
 ├── internal/
+│   ├── domain/                   # Shared Task + Attempt types; dependency-free             [C3]
+│   │   └── domain.go
 │   ├── llm/                      # Provider interface + OpenAI-compatible client            [F1]
 │   │   ├── llm.go                #   LLM interface
 │   │   ├── client.go             #   concrete client (base URL/key/model/timeout from env)
 │   │   ├── client_test.go        #   local OpenAI-compatible client tests
 │   │   └── live_test.go          #   `integration`-tagged provider smoke test
-│   ├── prompt/                   # firstPrompt / repairPrompt / extractGoCode — PURE        [F2]
+│   ├── prompt/                   # FirstPrompt / RepairPrompt / ExtractGoCode — PURE        [F2]
 │   │   └── prompt.go
-│   ├── repair/                   # The loop: Repair, runTests (temp module + go test)       [F3]
+│   ├── repair/                   # Verifier [F3] + Repair loop [F4] (build, then test)
 │   │   └── repair.go
-│   ├── task/                     # Task type + loading from tasks/                          [F6]
+│   ├── task/                     # Task loading only; returns domain.Task                  [F6]
 │   │   └── task.go
 │   ├── run/                      # Orchestration + in-memory Run store (goroutine per run)  [F7]
 │   │   └── run.go

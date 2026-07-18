@@ -5,10 +5,10 @@ changing anything.
 
 ## Overview
 
-A small Go program that runs a **generate → test → repair** loop: an LLM writes a Go
-function to a spec, the Go toolchain checks it, and on failure the compiler/test output is
-fed back so the model tries again — until the tests pass or attempts run out. It runs as a
-CLI (Phase 0) and as a web server with a live UI (Phase 3+).
+A small Go program that runs a **generate → verify → repair** loop: an LLM writes a complete
+Go source file to a spec, the Go toolchain checks it, and the first failed verifier output is
+fed back so the model tries again — until the tests pass or attempts run out. It runs as a CLI
+(Phase 0) and as a web server with a live UI (Phase 3+).
 
 Big constraints, stated up front:
 
@@ -22,14 +22,13 @@ Big constraints, stated up front:
 
 ## Implementation Status
 
-As of 2026-07-18, only F1 is implemented. The repository contains the Go module and
-`internal/llm`: the `LLM` interface, an OpenAI-compatible client, environment-backed
-configuration, and local tests. The client is locally verified with build, unit, race,
-coverage, and vet checks; its configured-provider smoke test returned non-empty text on
-2026-07-18.
+As of 2026-07-18, F1 and C3 are implemented. The repository contains the Go module,
+`internal/llm`, and the dependency-free shared types in `internal/domain`. The client has an
+OpenAI-compatible implementation, environment-backed configuration, and local tests; its
+configured-provider smoke test returned non-empty text on 2026-07-18.
 
-`prompt`, `repair`, `task`, `run`, `server`, `web`, and `cmd/repair` do not exist yet.
-C3 must resolve the shared data and error contracts before F2 begins.
+`prompt`, `repair`, `task`, `run`, `server`, `web`, and `cmd/repair` do not exist yet. F2 is
+the next implementation item.
 
 ## Technology Stack
 
@@ -42,20 +41,23 @@ C3 must resolve the shared data and error contracts before F2 begins.
 | Verifier (the "oracle") | `go build` + `go test` in a temp module |
 | Run state | in-memory `map[string]*Run` + mutex (SQLite via `modernc.org/sqlite` as a stretch) |
 | Concurrency | one goroutine per run; status exposed for polling |
-| Isolation | `context` timeout on `go test` — no sandbox |
+| Isolation | one injected verifier timeout across `go build` and `go test` — no sandbox |
 | Build / deploy | `go build` → single static binary |
 
 ## Package Architecture
 
-Each package has one job. Dependency direction: `web → server → run → repair → {prompt, llm}`,
-with `task` feeding `run`. Nothing imports upward; no cycles.
+Each package has one job. `internal/domain` is the bottom leaf: it imports nothing and owns
+shared `Task` and `Attempt` values. Dependency direction is `web → server → run → repair →
+{prompt, llm, domain}`, with `task → domain` and loaded task data feeding `run`. `run` may also
+import `domain` to pass tasks into repair and expose attempts. Nothing imports upward; no cycles.
 
 | Package | Responsibility |
 |---|---|
+| `internal/domain` | Dependency-free `Task` and `Attempt` data. `Task.TestCode` is human-authored verifier input and must never enter a prompt. |
 | `internal/llm` | The `LLM` interface + one concrete client for an OpenAI-compatible endpoint. Owns the HTTP call, and reads base URL + API key + model + timeout from env. Per-call timeout + one retry. The interface keeps the rest of the code independent of any specific provider — swapping providers is a base-URL/key/model change here and nowhere else. |
-| `internal/prompt` | `firstPrompt`, `repairPrompt`, `extractGoCode`. Pure string work, no I/O. Loop quality lives here. |
-| `internal/repair` | The loop: `Repair`, `runTests`. Temp-module + `go test` machinery + retry logic. The heart. |
-| `internal/task` | The `Task` type and task loading (hardcoded → files under `tasks/`). |
+| `internal/prompt` | `FirstPrompt(spec, signature)`, `RepairPrompt(spec, signature, previousCode, verifierOutput)`, and `ExtractGoCode(raw)`. Pure string work, no I/O and no `domain` import. |
+| `internal/repair` | The loop: `Repair`, `runTests`, and an optional synchronous attempt reporter. Owns temp-module verification (`go build`, then `go test`) and retry logic; imports `domain`, `llm`, and `prompt`. |
+| `internal/task` | F6 loader for task files. It returns `domain.Task`; it does not own the shared type. |
 | `internal/run` | Orchestration + state. Launches `Repair` in a goroutine, appends attempts to a `Run` as they land, answers "status of run X." In-memory. |
 | `internal/server` | HTTP handlers (start a run, poll a run) + serving the embedded UI. Thin. |
 | `web` | One HTML file + vanilla JS, baked into the binary. Polls the run endpoint and redraws. |
@@ -71,7 +73,11 @@ the client error. The retry and transport hardening work is tracked in C2.
 
 ## Data Shapes
 
+`Task` and `Attempt` live in `internal/domain`:
+
 ```go
+package domain
+
 type Task struct {
 	Name      string // identifier
 	Spec      string // natural-language description of desired behaviour
@@ -82,25 +88,34 @@ type Task struct {
 type Attempt struct {
 	N      int    // 1-based
 	Code   string // generated solution.go
-	Passed bool   // did `go test` exit 0?
-	Output string // combined compiler/test output — the feedback signal
+	Passed bool   // whether both verifier stages passed; false covers build/test failure or timeout
+	Output string // exact failed-command output, or the stable verifier-timeout note
 }
+```
+
+`Run` remains owned by `internal/run` in F7, when its JSON contract is frozen:
+
+```go
+package run
+
+import "codex-hackathon-july2026/internal/domain"
 
 type Run struct {
-	ID       string    `json:"id"`
-	Task     string    `json:"task"`
-	Spec     string    `json:"spec"`
-	Status   string    `json:"status"`   // "running" | "passed" | "gaveup"
-	Attempts []Attempt `json:"attempts"` // grows as the loop runs
+	ID       string           `json:"id"`
+	Task     string           `json:"task"`
+	Spec     string           `json:"spec"`
+	Status   string           `json:"status"` // "running" | "passed" | "gaveup"
+	Attempts []domain.Attempt `json:"attempts"`
 }
 ```
 
 ## The Loop
 
-1. `generate` builds a prompt (spec on attempt 1; previous code + `go test` output on
-   later attempts) and asks the model for a Go function.
+1. `generate` builds a prompt from primitive fields only: spec + signature on attempt 1;
+   previous candidate + exact failed verifier output later. It asks for a complete
+   `package solution` source file, never a test file.
 2. `runTests` writes `go.mod` + `solution.go` + `solution_test.go` into an `os.MkdirTemp`
-   module, runs `go build ./...`, then runs `go test ./...` under the injected timeout.
+   module, runs `go build ./...`, then runs `go test ./...` under one injected verifier timeout.
 3. Pass → return. Fail → record the attempt, feed its output into the next `generate`.
 4. Stop at `maxAttempts`.
 
@@ -121,18 +136,28 @@ SQLite (`modernc.org/sqlite`, zero-CGO) is a stretch item if runs need to surviv
 
 ## Error Handling
 
-- A valid text completion — even one that is invalid Go — is recorded as a failed `Attempt`
-  and drives the next iteration; it is **not** a program error.
-- Provider transport/protocol failures (network errors, non-success API responses, malformed
-  response JSON) are infrastructure errors until a later design explicitly classifies them.
-- A generated-code test-execution timeout is recorded as a failed attempt with a "likely
-  infinite loop" note. An LLM completion timeout is a provider/infrastructure error.
-- Only genuine infra faults (network down, can't create temp dir, `go` not on PATH) bubble
-  up as Go errors.
+`Repair` validates a positive attempt cap and verifier timeout before calling the provider.
+Then it follows this contract:
+
+- Any text returned by `LLM.Complete` with a nil error is candidate source, even when it is
+  empty, unfenced, or invalid Go. Extraction is conservative and never repairs it; the verifier
+  decides whether it works.
+- Provider transport, status, and protocol errors—including the concrete client's rejected empty
+  or malformed response—are infrastructure errors and stop the loop.
+- A non-zero `go build` or `go test` exit creates a failed attempt with the verbatim combined
+  output from the command that failed. A build failure skips `go test`. A successful attempt has
+  empty feedback.
+- If the derived verifier timeout expires while the caller context remains live, return a failed
+  attempt with one stable timeout note and no infrastructure error. If the caller context is
+  cancelled or reaches its deadline, return `ctx.Err()` instead.
+- Temp-directory, file-write, cleanup, and command-launch failures are infrastructure errors;
+  cleanup errors must not be silently discarded. A synchronous attempt-reporter error is a caller
+  error and stops the loop after the attempt it received. An exhausted positive attempt budget
+  returns the final failed attempt with a nil error.
 
 ## Deployment
 
-- **Target**: run the binary anywhere with the Go toolchain available (the loop shells out
-  to `go test`, so `go` must be on PATH on the host).
+- **Target**: run the binary anywhere with the Go toolchain available (the loop shells out to
+  `go build` and `go test`, so `go` must be on PATH on the host).
 - **Build output**: a single static binary via `go build -o repair ./cmd/repair`. The UI is
   embedded, so there is no separate frontend to deploy.

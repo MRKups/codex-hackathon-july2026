@@ -1,8 +1,8 @@
 # Go Repair Loop — Build Sketch
 
-A minimal **generate → test → repair** loop in Go. An LLM writes a Go function to a
-spec; the Go toolchain checks it; on failure the error is fed back and the model
-tries again, until the tests pass or attempts run out.
+A minimal **generate → verify → repair** loop in Go. An LLM writes a complete Go source
+file to a spec; the Go toolchain checks it; on failure the first verifier error is fed back
+and the model tries again, until the tests pass or attempts run out.
 
 No sandbox, no additional infrastructure services, no Python/JS. The configured LLM is the
 only external HTTP dependency; the Go toolchain *is* the verifier:
@@ -27,10 +27,10 @@ something.
 ## The loop, in plain English
 
 1. Take a **task**: a natural-language spec + a human-written test file.
-2. Ask the model for a Go function that satisfies the spec.
+2. Ask the model for a complete `package solution` source file that satisfies the spec.
 3. Write it to a throwaway temp dir, next to the test file.
-4. Run `go test` with a timeout.
-5. **Pass** → done. **Fail** → capture the compiler/test output, feed it back into the next prompt, return to step 2.
+4. Run `go build ./...`, then `go test ./...` only when the build succeeds, under one verifier timeout.
+5. **Pass** → done. **Fail** → capture the first failed command's output, feed it back into the next prompt, return to step 2.
 6. Give up after N attempts.
 
 It only moves forward, but each attempt can see the previous attempt's code and its
@@ -40,8 +40,12 @@ error — that feedback is the whole point.
 
 ## Data shapes
 
+`Task` and `Attempt` live in the dependency-free `internal/domain` package:
+
 ```go
-// A single unit of work. Spec + tests are the human's; Code is the model's.
+package domain
+
+// A single unit of work. Spec + tests are the human's; generated code is the model's.
 type Task struct {
 	Name      string // identifier, used for logging
 	Spec      string // natural-language description of the desired behaviour
@@ -53,18 +57,26 @@ type Task struct {
 type Attempt struct {
 	N      int    // attempt number, starting at 1
 	Code   string // the generated solution.go
-	Passed bool   // did `go test` exit 0?
-	Output string // combined compiler/test output — the feedback signal
+	Passed bool   // whether both verifier stages passed
+	Output string // empty on success; otherwise failed-stage output or a stable timeout note
 }
+```
+
+`Run` remains a future `internal/run` type; F7, not C3, freezes its JSON shape:
+
+```go
+package run
+
+import "codex-hackathon-july2026/internal/domain"
 
 // One run of the loop over one task. This is what the web layer stores and
 // serves. Attempts grows as the loop progresses, so a poller sees it fill up.
 type Run struct {
-	ID       string    `json:"id"`
-	Task     string    `json:"task"`     // task name, for the UI header
-	Spec     string    `json:"spec"`     // shown so the audience sees what's being solved
-	Status   string    `json:"status"`   // "running" | "passed" | "gaveup"
-	Attempts []Attempt `json:"attempts"` // appended to live, as each attempt finishes
+	ID       string           `json:"id"`
+	Task     string           `json:"task"`     // task name, for the UI header
+	Spec     string           `json:"spec"`     // shown so the audience sees what's being solved
+	Status   string           `json:"status"`   // "running" | "passed" | "gaveup"
+	Attempts []domain.Attempt `json:"attempts"` // appended to live, as each attempt finishes
 }
 ```
 
@@ -84,21 +96,31 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	"codex-hackathon-july2026/internal/domain"
+	"codex-hackathon-july2026/internal/llm"
+	"codex-hackathon-july2026/internal/prompt"
 )
 
-// LLM is any completion provider. Implement it once for OpenAI, Gemini, etc.
-type LLM interface {
-	Complete(ctx context.Context, prompt string) (string, error)
-}
+// AttemptReporter receives each verified attempt synchronously. Nil means no progress
+// reporting; a reporter error stops the loop and is returned to the caller.
+type AttemptReporter func(domain.Attempt) error
 
 // Repair is the outer loop: try up to maxAttempts times to satisfy the task.
 // Its attempt cap and test timeout are injected by the caller. It returns the final
-// attempt (passed or not) and only errors on infrastructure failures.
-func Repair(ctx context.Context, model LLM, task Task, maxAttempts int, testTimeout time.Duration) (Attempt, error) {
-	var last Attempt // zero value: N==0, signals "first attempt" to generate()
+// attempt (passed or not) and only errors on caller or infrastructure failures.
+func Repair(ctx context.Context, model llm.LLM, task domain.Task, maxAttempts int, testTimeout time.Duration, report AttemptReporter) (domain.Attempt, error) {
+	if maxAttempts <= 0 {
+		return domain.Attempt{}, errors.New("max attempts must be greater than zero")
+	}
+	if testTimeout <= 0 {
+		return domain.Attempt{}, errors.New("verifier timeout must be greater than zero")
+	}
+
+	var last domain.Attempt // zero value: N==0, signals "first attempt" to generate()
 
 	for i := 1; i <= maxAttempts; i++ {
-		code, err := generate(ctx, model, task, last)
+		code, err := generate(ctx, model, task.Spec, task.Signature, last)
 		if err != nil {
 			return last, err // real infra error (network, etc.) — bubble up
 		}
@@ -108,7 +130,12 @@ func Repair(ctx context.Context, model LLM, task Task, maxAttempts int, testTime
 			return last, err
 		}
 
-		last = Attempt{N: i, Code: code, Passed: passed, Output: output}
+		last = domain.Attempt{N: i, Code: code, Passed: passed, Output: output}
+		if report != nil {
+			if err := report(last); err != nil {
+				return last, err
+			}
+		}
 		if passed {
 			return last, nil // success
 		}
@@ -120,30 +147,34 @@ func Repair(ctx context.Context, model LLM, task Task, maxAttempts int, testTime
 
 // generate asks the model for code. On the first attempt it just sends the spec;
 // on later attempts it sends the previous broken code plus the error output.
-func generate(ctx context.Context, model LLM, task Task, prev Attempt) (string, error) {
-	var prompt string
+func generate(ctx context.Context, model llm.LLM, spec, signature string, prev domain.Attempt) (string, error) {
+	var promptText string
 	if prev.N == 0 {
-		prompt = firstPrompt(task) // TODO: spec + signature + "return only Go code"
+		promptText = prompt.FirstPrompt(spec, signature)
 	} else {
-		prompt = repairPrompt(task, prev) // TODO: spec + prev.Code + prev.Output + "fix it"
+		promptText = prompt.RepairPrompt(spec, signature, prev.Code, prev.Output)
 	}
 
-	raw, err := model.Complete(ctx, prompt)
+	raw, err := model.Complete(ctx, promptText)
 	if err != nil {
 		return "", err
 	}
-	return extractGoCode(raw), nil // TODO: strip ```go fences; treat output as untrusted text
+	return prompt.ExtractGoCode(raw), nil
 }
 
 // runTests writes a tiny throwaway Go module, then runs `go build` and `go test` against it.
 // A non-zero build/test exit is feedback. Filesystem, context-cancellation, and command
 // launch failures return an infrastructure error.
-func runTests(ctx context.Context, task Task, code string, timeout time.Duration) (passed bool, output string, infraErr error) {
+func runTests(ctx context.Context, task domain.Task, code string, timeout time.Duration) (passed bool, output string, infraErr error) {
 	dir, err := os.MkdirTemp("", "repair-*")
 	if err != nil {
 		return false, "", err
 	}
-	defer os.RemoveAll(dir)
+	defer func() {
+		if cleanupErr := os.RemoveAll(dir); cleanupErr != nil {
+			infraErr = errors.Join(infraErr, cleanupErr)
+		}
+	}()
 
 	// A self-contained module. stdlib only in v1 → no `go mod tidy` needed.
 	if err := write(dir, "go.mod", "module solution\n\ngo 1.26\n"); err != nil {
@@ -165,11 +196,11 @@ func runTests(ctx context.Context, task Task, code string, timeout time.Duration
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
 
-		if contextErr := testContext.Err(); contextErr != nil {
-			if contextErr == context.DeadlineExceeded {
-				return false, "timeout — generated code likely hung (infinite loop)", nil
-			}
-			return false, "", contextErr
+		if callerErr := ctx.Err(); callerErr != nil {
+			return false, "", callerErr
+		}
+		if testContext.Err() != nil {
+			return false, "verifier timeout — generated code may have hung", nil
 		}
 		if err == nil {
 			continue
@@ -190,11 +221,45 @@ func write(dir, name, content string) error {
 }
 ```
 
-Helpers left for you / Codex to fill in:
+Prompt API, to be implemented by F2:
 
-- `firstPrompt(task) string` — spec + signature, instruct "output only a Go function, package `solution`, stdlib only, no explanation."
-- `repairPrompt(task, prev) string` — same, plus the previous code and the exact `go test` output, instruct "fix the code so the tests pass."
-- `extractGoCode(raw) string` — pull the code out of the model's reply (strip complete markdown fences when present). Don't "repair" it — never add a package header or alter the code; if it is junk, the compiler will say so next pass.
+- `FirstPrompt(spec, signature string) string` — require a complete `package solution` source
+  file, the specified signature, stdlib only, and no explanation or tests.
+- `RepairPrompt(spec, signature, previousCode, verifierOutput string) string` — same request,
+  plus the previous candidate and exact output from the first verifier stage that failed.
+- `ExtractGoCode(raw string) string` — remove only one unambiguous, complete markdown code
+  fence. Never add a package header, imports, formatting, or another repair; if the reply is
+  junk, the compiler will say so next pass.
+
+The prompt API deliberately accepts only primitive strings. `generate` receives only spec and
+signature, while `runTests` is the only helper that receives `Task.TestCode`.
+
+---
+
+## Failure contract
+
+`Repair` validates `maxAttempts > 0` and a positive verifier timeout before it contacts the
+provider. After that, each event has one classification:
+
+| Event | Result |
+|---|---|
+| `llm.LLM.Complete` returns `raw, nil` | `prompt.ExtractGoCode(raw)` is candidate source, even if it is empty or invalid Go. |
+| Provider transport, status, or protocol error | Return the last completed attempt and a non-nil infrastructure error; do not fabricate an attempt. |
+| `go build` exits non-zero | Failed attempt with that command's verbatim `CombinedOutput`; do not run tests. |
+| `go test` exits non-zero after a build succeeds | Failed attempt with that command's verbatim `CombinedOutput`. |
+| Derived verifier timeout while the caller context remains live | Failed attempt with `verifier timeout — generated code may have hung` and nil infrastructure error. |
+| Caller cancellation or deadline | Return `ctx.Err()`; never relabel it as a verifier timeout. |
+| Temp-dir, write, cleanup, process-launch, or attempt-reporter failure | Infrastructure/caller error. Cleanup errors must not be silently swallowed. |
+| Attempt budget exhausted | Return the final failed attempt and nil error. |
+
+`Attempt.Output` is empty on a passing attempt. The optional synchronous `AttemptReporter` is
+called after every completed verification so the terminal CLI can print real-time progress and
+the later run store can append attempts without changing the repair loop. A reporter error stops
+the loop and returns the attempt it received plus that error.
+
+The concrete F1 client rejects an empty or malformed provider response as a protocol error. The
+abstract rule above still treats any nil-error string from another `llm.LLM` implementation as
+candidate source, which keeps fakes and future providers unambiguous.
 
 ---
 
@@ -202,20 +267,33 @@ Helpers left for you / Codex to fill in:
 
 Break it into small Go packages, each with one job. Nothing points back up the list.
 
+- **`domain/`** — dependency-free owner of `Task` and `Attempt`. `Task.TestCode` is fixed,
+  human-authored verifier input and never enters a model prompt.
 - **`llm/`** — talks to the model. One interface (`LLM`), one concrete client (OpenAI-compatible chat completions). Owns the HTTP call and reads `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, and `LLM_TIMEOUT` from env. It applies a per-call timeout + one retry. Nothing else in the system knows or cares which provider you use.
-- **`prompt/`** — turns a task (+ optional previous attempt) into a prompt string, and pulls Go code back out of a model reply (`firstPrompt`, `repairPrompt`, `extractGoCode`). Pure string work, no I/O. Trivial to test and iterate — **this is where loop quality actually lives**, so keep it isolated.
-- **`repair/`** — the loop itself (`Repair`, `runTests`). Depends on `llm` + `prompt`. Owns the temp-dir-and-`go test` machinery and the retry logic. The heart; everything else is scaffolding around it.
-- **`task/`** — the `Task` type and where tasks come from. v1: a hardcoded slice. Later: load from a folder per task (`spec.md` + `solution_test.go`). Later still: built from an API request.
+- **`prompt/`** — pure string work: `FirstPrompt`, `RepairPrompt`, and `ExtractGoCode`. It
+  imports no project package; repair supplies only spec, signature, candidate code, and verifier
+  output. This is where loop quality lives, so keep it isolated.
+- **`repair/`** — the loop itself (`Repair`, `runTests`). Depends on `domain`, `llm`, and
+  `prompt`. Owns the temp-dir verifier (`go build`, then `go test`) and retry logic. The heart;
+  everything else is scaffolding around it.
+- **`task/`** — F6 loader for task files. It returns `domain.Task`; it does not own the type.
 - **`run/`** — orchestration + state. Kicks off a `Repair` in a goroutine, appends attempts to a `Run` as they land, answers "status of run X." In-memory (a `map[string]*Run` + a mutex) for v1. This is the bridge between the pure loop and the web.
 - **`server/`** — HTTP. Two handlers (start a run, poll a run) plus serving the UI. Thin.
 - **`web/`** — the frontend. **One HTML file, vanilla JS, baked into the binary with `embed`.** No npm, no build step.
 
-Dependency direction:
+Import direction:
 
 ```
-web → server → run → repair → { prompt, llm }
-                       task ↗
+web → server → run → repair
+                    ├→ prompt
+                    ├→ llm
+                    └→ domain
+task → domain
+run  → domain
 ```
+
+Task data flows separately: `task` loader → `domain.Task` → `run` or `repair`. F4 may construct
+a `domain.Task` directly because it predates the F6 loader.
 
 That clean layering is what lets you build phase by phase — and parallelise the top against the bottom (see Build order).
 
@@ -226,11 +304,11 @@ That clean layering is what lets you build phase by phase — and parallelise th
 The rule: **each phase produces something that works and demos before the next begins.** Never have two broken layers at once.
 
 **Phase 0 — One green run in the terminal.** *(critical path — do this first, protect it)*
-Get a single LLM completion working in isolation first — an API call returning text is your first integration risk; nail it before wrapping it in anything. Then hardcode **one** task with a deliberately tricky spec (an off-by-one, an empty-input case — something a first attempt plausibly gets wrong), write its test file by hand, and wire the loop: generate → `go test` → feed failure back → retry. Print attempt number, pass/fail, output.
+Get a single LLM completion working in isolation first — an API call returning text is your first integration risk; nail it before wrapping it in anything. Then hardcode **one** task with a deliberately tricky spec (an off-by-one, an empty-input case — something a first attempt plausibly gets wrong), write its test file by hand, and wire the loop: generate → `go build` → `go test` → feed first-failure output back → retry. Print attempt number, pass/fail, output.
 *Done when:* you watch `attempt 1 fail → … → attempt N pass` in the terminal. **This alone is a complete, honest demo.** Everything after is upside — guard this milestone.
 
 **Phase 1 — Make the loop actually good.** *(still terminal)*
-Real `firstPrompt` / `repairPrompt` — the repair prompt must include the previous code **and** the exact `go test` output; that feedback is what makes attempt N+1 smarter than N. Solid `extractGoCode`. Then throw 3–4 different tricky tasks at it and tune until it converges *repeatably*, not just once.
+Tune the F2 `FirstPrompt` / `RepairPrompt` pair — the repair prompt must include the previous code **and** the exact first-failing verifier output; that feedback is what makes attempt N+1 smarter than N. Tune `ExtractGoCode` only within its conservative no-repair rule. Then throw 3–4 different tricky tasks at it and tune until it converges *repeatably*, not just once.
 *Done when:* it fixes several different bugs on its own, reliably.
 
 **Phase 2 — Wrap it in state.** *(the bridge)*
@@ -281,5 +359,5 @@ but it's more moving parts than a one-day demo needs.)
 
 - **Package header.** Generated code and the test file must share a package (`solution`). Instruct the model; a missing header is compiler feedback for the next attempt, not something the host rewrites.
 - **Stdlib only in v1.** If the model imports third-party packages you'd need `go mod tidy` and network. Forbid it in the prompt; keep tasks pure-function so it never needs to.
-- **Test-failure is not a program error.** `cmd.CombinedOutput()` returns a non-nil `err` on any non-zero exit. That's expected on a failing test — don't bubble it up as an infra failure. Provider, filesystem, command-launch, and caller-cancellation failures are "real" errors.
+- **Verifier failure is not a program error.** `cmd.CombinedOutput()` returns a non-nil `err` on any non-zero build or test exit. That is expected feedback — do not bubble it up as an infra failure. Provider, filesystem, command-launch, cleanup, and caller-cancellation failures are real errors.
 - **Untrusted output.** Treat the model's reply as text. Extract the code; never `eval`/trust formatting.
