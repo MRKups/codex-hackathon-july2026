@@ -35,20 +35,29 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   An initial HTTP 401 was traced to and resolved by correcting the local API key; no secret is
   tracked. The completed C3 contract below unblocks F2.
 
-- [ ] **F2 — Prompt + extraction.** `internal/prompt` (pure, no I/O):
+- [x] **F2 — Prompt + extraction.** `internal/prompt` (pure, no I/O):
   `FirstPrompt(spec, signature)`, `RepairPrompt(spec, signature, previousCode, verifierOutput)`,
   and `ExtractGoCode(raw)`. Prompts require a complete `package solution` source file with the
   specified signature, stdlib only, source only, and never tests. Repair prompts include the
   previous candidate and exact output from the first failed verifier stage. Extraction removes
-  only one unambiguous complete fence and never repairs the source.
+  only one unambiguous complete backtick fence when it is the whole reply apart from outer
+  whitespace, and never repairs the source. Verification (2026-07-18): `gofmt -l $(rg --files
+  -g '*.go')`, `go build ./...`, `go test ./...`, `go test -race ./...`, `go test -cover ./...`
+  (97.4% for `internal/prompt`), `go vet ./...`, and `git diff --check` passed. No live provider
+  call was required.
 
-- [ ] **F3 — verifier.** `internal/repair`: write `go.mod`, model-produced `solution.go`, and
+- [x] **F3 — verifier.** `internal/repair`: write `go.mod`, model-produced `solution.go`, and
   the frozen `solution_test.go` from `domain.Task` into an `os.MkdirTemp` module. Write source
   verbatim; do not run `go mod tidy`, install dependencies, or repair it. Run `go build ./...`,
   then `go test ./...` only after a successful build, under one injected verifier timeout.
   A non-zero command exit is feedback with that command's raw combined output, not an infra
   error. Verifier timeout is failed-attempt feedback; caller cancellation, temp/write/cleanup,
-  and command-launch failures bubble as errors.
+  and command-launch failures bubble as errors. Verification (2026-07-18): passing code,
+  build failure, test failure, malformed test source, verifier timeout, caller cancellation,
+  missing `go`, and invalid-input tests passed. `gofmt -l $(rg --files -g '*.go')`, `go build
+  ./...`, `go test ./...`, `go test -race ./...`, `go test -cover ./...` (79.5% for
+  `internal/repair`), `go vet ./...`, and `git diff --check` passed. No live provider call was
+  required.
 
 - [ ] **F4 — Repair loop + one hardcoded task.** `internal/repair` `Repair(...)` wiring
   `llm.LLM` + `domain.Task` through generate → verify → feedback → retry, plus

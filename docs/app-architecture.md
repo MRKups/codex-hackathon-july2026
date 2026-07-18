@@ -46,8 +46,10 @@ As of 2026-07-18, F1 and C3 are implemented. The repository contains the Go modu
 OpenAI-compatible implementation, environment-backed configuration, and local tests; its
 configured-provider smoke test returned non-empty text on 2026-07-18.
 
-`prompt`, `repair`, `task`, `run`, `server`, `web`, and `cmd/repair` do not exist yet. F2 is
-the next implementation item.
+`internal/prompt` now provides the pure F2 coder prompt builders and conservative source
+extraction; `TestPrompt` remains F15 work. `internal/repair` now provides the F3 authored-oracle
+verifier: it writes a disposable module and runs build before test under one timeout. The repair
+loop itself, `task`, `run`, `server`, `web`, and `cmd/repair` do not exist yet. F4 is next.
 
 The two-oracle-mode design (`authored` / `generated`) was adopted on 2026-07-18, after F1/C3
 and before F2. `internal/domain` predates it and still needs the `OracleMode` field added —

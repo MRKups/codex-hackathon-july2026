@@ -334,7 +334,7 @@ func resolveOracle(ctx context.Context, tester llm.LLM, task domain.Task) (domai
 }
 ```
 
-Prompt API, to be implemented by F2 (`TestPrompt` by F15):
+Prompt API — F2 complete (`TestPrompt` remains F15 work):
 
 - `FirstPrompt(spec, signature string) string` — require a complete `package solution` source
   file, the specified signature, stdlib only, and no explanation or tests.
@@ -344,9 +344,11 @@ Prompt API, to be implemented by F2 (`TestPrompt` by F15):
   file exercising the specified signature: stdlib `testing` only, table-driven, no
   implementation, no `main`. Takes spec and signature and *nothing else* — there is no
   parameter through which candidate code could reach it, and that absence is the guarantee.
-- `ExtractGoCode(raw string) string` — remove only one unambiguous, complete markdown code
-  fence. Never add a package header, imports, formatting, or another repair; if the reply is
-  junk, the compiler will say so next pass. Shared by both roles.
+- `ExtractGoCode(raw string) string` — unwrap only one unambiguous, complete Markdown backtick
+  fence that occupies the whole reply apart from outer whitespace, preserving its payload
+  byte-for-byte. Never add a package header, imports, formatting, or another repair; prose,
+  multiple blocks, and malformed replies stay raw so the compiler can reject them next pass.
+  Shared by both roles.
 
 The prompt API deliberately accepts only primitive strings, and the parameter lists are the
 enforcement mechanism for the core principle: `FirstPrompt` and `RepairPrompt` have no way to

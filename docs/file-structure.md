@@ -17,11 +17,17 @@ that owns it.
 ├── internal/
 │   ├── domain/                   # Shared Task and Attempt values; imports nothing [C3]
 │   │   └── domain.go
-│   └── llm/                      # Provider boundary + OpenAI-compatible client [F1]
-│       ├── llm.go
-│       ├── client.go
-│       ├── client_test.go
-│       └── live_test.go             # `integration`-tagged configured-provider smoke test
+│   ├── llm/                      # Provider boundary + OpenAI-compatible client [F1]
+│   │   ├── llm.go
+│   │   ├── client.go
+│   │   ├── client_test.go
+│   │   └── live_test.go             # `integration`-tagged configured-provider smoke test
+│   ├── prompt/                   # Pure coder prompts + conservative extraction [F2]
+│   │   ├── prompt.go
+│   │   └── prompt_test.go
+│   └── repair/                   # Authored-oracle temp-module verifier [F3]
+│       ├── repair.go
+│       └── repair_test.go
 └── docs/
     ├── go-repair-loop.md
     ├── app-architecture.md
@@ -33,7 +39,10 @@ that owns it.
 F1 is complete: a configured provider returned one real, non-empty completion on 2026-07-18.
 `.env` is a local, Git-ignored copy of `.env.example`; source it to provide provider variables
 to the live smoke test. C3 is complete: `internal/domain` owns the shared data without creating
-an upward import path. F2 is next; every other target path remains planned.
+an upward import path. F2 is complete: `internal/prompt` is dependency-free and has no path for
+oracle source to enter a coder prompt. F3 is complete: `internal/repair` writes candidate and
+authored test source verbatim to a disposable module, then builds and tests it. F4 is next;
+every other target path remains planned.
 
 ## Target Structure
 
