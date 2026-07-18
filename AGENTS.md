@@ -28,7 +28,7 @@ Keep this file short. A bloated rules file gets partially ignored.
   its frozen oracle; inspect the task after the run, without making research analysis a
   prerequisite for a working demo.
 
-- **Respect the dependency direction.** `web → server → run → repair → { prompt, llm }`,
+- **Respect the dependency direction.** `browser → server → run → repair → { prompt, llm }`,
   with `task` feeding `run`. No package imports "upward" and no import cycles. Each
   package has one job (see `docs/app-architecture.md`). If you need something from an
   upper layer, the design is wrong — stop and flag it.
@@ -46,8 +46,9 @@ Keep this file short. A bloated rules file gets partially ignored.
 
 - **Config from env/flags, never hardcoded.** API key, base URL, model names, port, attempt
   cap, and timeout are all injected. Never commit a secret; never hardcode an endpoint or
-  model string in a package. When F17 adds the generated-oracle role, coder and test-writer
-  models are configured separately so they can be decorrelated — see `docs/app-architecture.md`.
+  model string in a package. Coder and test-writer defaults are configured separately, while
+  the browser may select only from the local configured model allowlist — see
+  `docs/app-architecture.md`.
 
 - **Formatting is canonical.** `gofmt` and `go vet` must be clean before anything is
   "done." Canonical formatting keeps generated diffs small and reviewable.

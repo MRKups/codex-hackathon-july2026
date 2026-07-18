@@ -26,15 +26,6 @@
         padding: 24px 0 40px;
       }
 
-      header.page-header {
-        display: flex;
-        align-items: flex-start;
-        justify-content: space-between;
-        gap: 24px;
-        padding-bottom: 20px;
-        border-bottom: 1px solid #d1d5db;
-      }
-
       h1,
       h2,
       h3,
@@ -44,46 +35,34 @@
 
       h1 {
         margin-bottom: 4px;
-        font-size: 1.4rem;
-        font-weight: 650;
+        font-size: 1.45rem;
+        font-weight: 680;
       }
 
       h2 {
         margin-bottom: 12px;
         font-size: 1rem;
-        font-weight: 650;
+        font-weight: 680;
       }
 
       h3 {
         margin-bottom: 0;
         font-size: 0.9rem;
-        font-weight: 650;
-      }
-
-      .muted {
-        margin-bottom: 0;
-        color: #667085;
-        font-size: 0.9rem;
-        line-height: 1.5;
-      }
-
-      .actions {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: flex-end;
-        gap: 8px;
+        font-weight: 680;
       }
 
       button,
-      select {
+      input,
+      select,
+      textarea {
         font: inherit;
       }
 
       button {
         padding: 8px 12px;
         color: #1f2937;
-        font-weight: 600;
-        border: 1px solid #9ca3af;
+        font-weight: 650;
+        border: 1px solid #98a2b3;
         border-radius: 4px;
         background: #fff;
         cursor: pointer;
@@ -105,18 +84,148 @@
 
       button:disabled {
         cursor: wait;
-        opacity: 0.6;
+        opacity: 0.58;
+      }
+
+      .page-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 24px;
+        padding-bottom: 20px;
+        border-bottom: 1px solid #d1d5db;
+      }
+
+      .muted {
+        margin-bottom: 0;
+        color: #667085;
+        font-size: 0.9rem;
+        line-height: 1.5;
+      }
+
+      .header-actions,
+      .form-actions,
+      .role-list,
+      .preset-list,
+      .comparison-controls {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
       }
 
       #cancelButton[hidden],
-      #downloadButton[hidden] {
+      #downloadButton[hidden],
+      #modelRoles[hidden],
+      #comparisonControls[hidden] {
         display: none;
+      }
+
+      .setup {
+        margin: 20px 0;
+        padding: 16px;
+        border: 1px solid #d1d5db;
+        border-radius: 4px;
+        background: #fff;
+      }
+
+      fieldset {
+        min-width: 0;
+        margin: 0;
+        padding: 0;
+        border: 0;
+      }
+
+      legend {
+        padding: 0;
+        margin-bottom: 12px;
+        font-size: 1rem;
+        font-weight: 680;
+      }
+
+      .form-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 0.7fr) minmax(180px, 0.65fr) minmax(180px, 0.65fr);
+        gap: 12px;
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        color: #344054;
+        font-size: 0.82rem;
+        font-weight: 650;
+      }
+
+      .wide {
+        grid-column: 1 / -1;
+      }
+
+      input,
+      select,
+      textarea {
+        width: 100%;
+        padding: 8px 9px;
+        color: #1f2937;
+        border: 1px solid #98a2b3;
+        border-radius: 4px;
+        background: #fff;
+        font-weight: 400;
+      }
+
+      textarea {
+        min-height: 104px;
+        resize: vertical;
+        line-height: 1.45;
+      }
+
+      input:focus,
+      select:focus,
+      textarea:focus,
+      button:focus-visible {
+        outline: 3px solid #bfdbfe;
+        outline-offset: 2px;
+      }
+
+      .preset-row {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        align-items: center;
+        gap: 12px;
+        margin-top: 14px;
+        padding-top: 14px;
+        border-top: 1px solid #eaecf0;
+      }
+
+      .helper,
+      .preset-empty {
+        margin: 0;
+        color: #667085;
+        font-size: 0.82rem;
+        line-height: 1.45;
+      }
+
+      .preset-button {
+        padding: 6px 9px;
+        color: #344054;
+        font-size: 0.82rem;
+        font-weight: 600;
+      }
+
+      .form-actions {
+        justify-content: space-between;
+        margin-top: 14px;
+      }
+
+      .form-actions .helper {
+        max-width: 720px;
       }
 
       .run-line {
         display: flex;
         align-items: center;
-        gap: 10px;
+        flex-wrap: wrap;
+        gap: 8px 10px;
         margin: 16px 0;
         color: #667085;
         font-size: 0.9rem;
@@ -127,10 +236,17 @@
         padding: 3px 7px;
         color: #475467;
         font-size: 0.75rem;
-        font-weight: 650;
+        font-weight: 680;
         border: 1px solid #98a2b3;
         border-radius: 4px;
         background: #fff;
+      }
+
+      .run-status.running,
+      .run-status.canceling {
+        color: #1d4ed8;
+        border-color: #93c5fd;
+        background: #eff6ff;
       }
 
       .run-status.passed {
@@ -159,6 +275,34 @@
         background: #fffbeb;
       }
 
+      .model-roles {
+        margin: -5px 0 20px;
+        padding: 10px 12px;
+        border-left: 3px solid #94a3b8;
+        background: #f8fafc;
+      }
+
+      .model-roles h2 {
+        margin-bottom: 7px;
+        color: #475467;
+        font-size: 0.82rem;
+      }
+
+      .role-list {
+        gap: 16px;
+        color: #475467;
+        font-size: 0.82rem;
+      }
+
+      .role-list strong {
+        color: #344054;
+      }
+
+      .role-list code {
+        color: #1e3a5f;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
       .context,
       .comparison {
         display: grid;
@@ -166,7 +310,7 @@
       }
 
       .context {
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
         margin-bottom: 24px;
       }
 
@@ -203,7 +347,7 @@
       .attempt-state {
         color: #667085;
         font-size: 0.75rem;
-        font-weight: 650;
+        font-weight: 680;
       }
 
       .label {
@@ -248,38 +392,21 @@
         margin-bottom: 12px;
       }
 
-      .controls {
-        display: flex;
-        align-items: center;
-        flex-wrap: wrap;
-        gap: 8px;
+      .comparison-controls {
         margin-bottom: 14px;
         color: #475467;
         font-size: 0.85rem;
       }
 
-      .controls[hidden] {
-        display: none;
-      }
-
-      select {
-        max-width: 190px;
-        padding: 6px 8px;
-        color: #1f2937;
-        border: 1px solid #9ca3af;
-        border-radius: 4px;
-        background: #fff;
+      .comparison-controls select {
+        width: auto;
+        min-width: 155px;
       }
 
       .pane {
         display: flex;
         flex-direction: column;
         overflow: hidden;
-      }
-
-      .panel pre {
-        min-height: 200px;
-        max-height: 280px;
       }
 
       .pane[data-tone="failed"] {
@@ -315,7 +442,7 @@
 
       pre {
         flex: 1;
-        min-height: 300px;
+        min-height: 295px;
         max-height: 570px;
         margin: 12px;
         padding: 12px;
@@ -327,6 +454,12 @@
         font-size: 0.8rem;
         line-height: 1.55;
         white-space: pre;
+      }
+
+      .panel pre {
+        min-height: 200px;
+        max-height: 280px;
+        margin: 0;
       }
 
       #feedbackCode {
@@ -343,6 +476,7 @@
       }
 
       @media (max-width: 980px) {
+        .form-grid,
         .comparison {
           grid-template-columns: 1fr;
         }
@@ -354,14 +488,16 @@
           padding-top: 16px;
         }
 
-        header.page-header,
+        .page-header,
         .context,
-        .comparison-header {
+        .comparison-header,
+        .preset-row,
+        .form-actions {
           display: grid;
           grid-template-columns: 1fr;
         }
 
-        .actions {
+        .header-actions {
           justify-content: flex-start;
         }
       }
@@ -372,37 +508,88 @@
       <header class="page-header">
         <div>
           <h1>Repair Loop</h1>
-          <p class="muted">A Go candidate is checked against one frozen authored oracle. Failed verifier feedback becomes the next repair input.</p>
+          <p class="muted">Configure a task, freeze a blind oracle, then inspect how later candidate code responds to exact Go verifier feedback.</p>
         </div>
-        <div class="actions">
+        <div class="header-actions">
           <button id="downloadButton" type="button" hidden>Download run JSON</button>
           <button id="cancelButton" type="button" hidden>Cancel run</button>
-          <button class="primary" id="runButton" type="button">Run live repair</button>
         </div>
       </header>
 
-      <div class="run-line">
-        <span class="run-status" id="runStatus">Ready</span>
-        <span id="runSummary">The fixed task and oracle load without contacting the provider.</span>
+      <section class="setup" aria-labelledby="setupTitle">
+        <form id="runForm" novalidate>
+          <fieldset id="runFields" disabled>
+            <legend id="setupTitle">Configure a run</legend>
+            <div class="form-grid">
+              <label for="nameInput">
+                Task name (optional)
+                <input id="nameInput" name="name" type="text" autocomplete="off" placeholder="e.g. split-cents">
+              </label>
+              <label for="coderModelSelect">
+                Coder model
+                <select id="coderModelSelect" name="coderModel" required>
+                  <option value="">Loading models…</option>
+                </select>
+              </label>
+              <label for="testerModelSelect">
+                Blind test-writer model
+                <select id="testerModelSelect" name="testerModel" required>
+                  <option value="">Loading models…</option>
+                </select>
+              </label>
+              <label class="wide" for="specInput">
+                Specification
+                <textarea id="specInput" name="spec" required placeholder="Describe the behaviour the candidate should implement."></textarea>
+              </label>
+              <label class="wide" for="signatureInput">
+                Pinned Go signature
+                <input id="signatureInput" name="signature" type="text" required autocomplete="off" spellcheck="false" placeholder="func Solve(input string) (string, error)">
+              </label>
+            </div>
+
+            <div class="preset-row">
+              <p class="helper">Presets fill the editable fields only. They never start a run.</p>
+              <div class="preset-list" id="presetButtons" aria-label="Task presets"></div>
+            </div>
+          </fieldset>
+
+          <div class="form-actions">
+            <p class="helper" id="formHelp">Loading available models and task presets…</p>
+            <button class="primary" id="runButton" type="submit" disabled>Start repair</button>
+          </div>
+        </form>
+      </section>
+
+      <div class="run-line" aria-live="polite">
+        <span class="run-status" id="runStatus">Loading setup</span>
+        <span id="runSummary">The browser is loading model choices and presets. No provider request has been made.</span>
       </div>
 
-      <section class="context" aria-label="Task context">
+      <section class="model-roles" id="modelRoles" hidden aria-labelledby="modelRolesTitle">
+        <h2 id="modelRolesTitle">Model roles for this run</h2>
+        <div class="role-list">
+          <span><strong>Coder:</strong> <code id="coderModelText">—</code></span>
+          <span><strong>Blind test-writer:</strong> <code id="testerModelText">—</code></span>
+        </div>
+      </section>
+
+      <section class="context" aria-label="Task and oracle context">
         <article class="panel">
           <div class="panel-header">
             <h2>Task specification</h2>
-            <span class="label">Coder input</span>
+            <span class="label" id="taskNameLabel">Draft task</span>
           </div>
-          <p class="spec" id="specText">Loading fixed task…</p>
-          <code class="signature" id="signatureText">Loading signature…</code>
+          <p class="spec" id="specText">Enter a specification and signature to prepare a run.</p>
+          <code class="signature" id="signatureText">No signature entered.</code>
         </article>
 
         <article class="panel">
           <div class="panel-header">
-            <h2>Frozen authored oracle</h2>
-            <span class="label" id="oracleLabel">Never sent to coder</span>
+            <h2>Blind oracle</h2>
+            <span class="label" id="oracleLabel">Pending</span>
           </div>
-          <p class="oracle-note">This test source stays fixed for the entire run. The coder sees verifier feedback, never this file.</p>
-          <pre id="oracleCode">Loading frozen oracle…</pre>
+          <p class="oracle-note" id="oracleNote">The separate test-writer will see only the specification and signature. Its test source remains pending until the server freezes it before candidate attempt 1.</p>
+          <pre id="oracleCode">Oracle pending — no candidate is allowed to run until an oracle is accepted.</pre>
         </article>
       </section>
 
@@ -410,11 +597,11 @@
         <div class="comparison-header">
           <div>
             <h2 id="comparisonTitle">Candidate comparison</h2>
-            <p class="muted">Compare the source that was checked with a later candidate under the same oracle.</p>
+            <p class="muted">The middle pane is the exact Go feedback from the left candidate. A later candidate is shown under the same frozen oracle.</p>
           </div>
         </div>
 
-        <div class="controls" id="controls" hidden>
+        <div class="comparison-controls" id="comparisonControls" hidden>
           <span>Compare</span>
           <select id="leftSelect" aria-label="Left attempt"></select>
           <span>with</span>
@@ -427,7 +614,7 @@
               <h3 id="leftTitle">Candidate source</h3>
               <span class="attempt-state" id="leftState"></span>
             </div>
-            <p class="pane-note" id="leftNote">Start a run to show the source sent to Go.</p>
+            <p class="pane-note" id="leftNote">Start a run to show a candidate source after Go has checked it.</p>
             <pre id="leftCode">No candidate yet.</pre>
           </article>
 
@@ -436,7 +623,7 @@
               <h3 id="feedbackTitle">Verifier feedback</h3>
               <span class="attempt-state" id="feedbackState"></span>
             </div>
-            <p class="pane-note" id="feedbackNote">Compiler or test output will appear here after a failed verification.</p>
+            <p class="pane-note" id="feedbackNote">Compiler or test output appears here only after a completed failed verification.</p>
             <pre id="feedbackCode">No verifier output yet.</pre>
           </article>
 
@@ -445,7 +632,7 @@
               <h3 id="rightTitle">Later candidate</h3>
               <span class="attempt-state" id="rightState"></span>
             </div>
-            <p class="pane-note" id="rightNote">A later verified candidate will appear here when one exists.</p>
+            <p class="pane-note" id="rightNote">A later checked candidate appears here when one exists.</p>
             <pre id="rightCode">No later candidate yet.</pre>
           </article>
         </div>
@@ -458,26 +645,43 @@
       (function () {
         "use strict";
 
+        var pollIntervalMilliseconds = 500;
         var state = {
           cancelRequested: false,
           leftAttempt: null,
           pollGeneration: 0,
           pollTimer: null,
-          rightAttempt: null,
           run: null,
-          runID: null
+          runID: null,
+          setupReady: false,
+          startRequestID: null,
+          rightAttempt: null
         };
 
+        var runForm = document.getElementById("runForm");
+        var runFields = document.getElementById("runFields");
+        var nameInput = document.getElementById("nameInput");
+        var specInput = document.getElementById("specInput");
+        var signatureInput = document.getElementById("signatureInput");
+        var coderModelSelect = document.getElementById("coderModelSelect");
+        var testerModelSelect = document.getElementById("testerModelSelect");
+        var presetButtons = document.getElementById("presetButtons");
+        var formHelp = document.getElementById("formHelp");
         var runButton = document.getElementById("runButton");
         var cancelButton = document.getElementById("cancelButton");
         var downloadButton = document.getElementById("downloadButton");
         var runStatus = document.getElementById("runStatus");
         var runSummary = document.getElementById("runSummary");
+        var modelRoles = document.getElementById("modelRoles");
+        var coderModelText = document.getElementById("coderModelText");
+        var testerModelText = document.getElementById("testerModelText");
+        var taskNameLabel = document.getElementById("taskNameLabel");
         var specText = document.getElementById("specText");
         var signatureText = document.getElementById("signatureText");
         var oracleLabel = document.getElementById("oracleLabel");
+        var oracleNote = document.getElementById("oracleNote");
         var oracleCode = document.getElementById("oracleCode");
-        var controls = document.getElementById("controls");
+        var comparisonControls = document.getElementById("comparisonControls");
         var leftSelect = document.getElementById("leftSelect");
         var rightSelect = document.getElementById("rightSelect");
         var notice = document.getElementById("notice");
@@ -505,7 +709,7 @@
           }
         };
 
-        runButton.addEventListener("click", startRun);
+        runForm.addEventListener("submit", startRun);
         cancelButton.addEventListener("click", cancelRun);
         downloadButton.addEventListener("click", downloadRun);
         leftSelect.addEventListener("change", function () {
@@ -516,45 +720,171 @@
           state.rightAttempt = Number(rightSelect.value);
           renderComparison();
         });
+        nameInput.addEventListener("input", renderDraftContext);
+        specInput.addEventListener("input", renderDraftContext);
+        signatureInput.addEventListener("input", renderDraftContext);
 
-        loadTask();
+        loadSetup();
 
-        function loadTask() {
-          fetch("/task", {
+        function loadSetup() {
+          fetch("/setup", {
             headers: { "Accept": "application/json" },
             cache: "no-store"
           })
             .then(readJSON)
-            .then(renderTask)
-            .catch(function () {
-              specText.textContent = "The fixed task could not be loaded.";
-              signatureText.textContent = "No signature available.";
-              oracleCode.textContent = "No oracle available.";
+            .then(function (setup) {
+              populateSetup(setup);
+              state.setupReady = true;
+              runFields.disabled = false;
+              runButton.disabled = false;
+              runButton.textContent = "Start repair";
+              formHelp.textContent = "The blind test-writer receives only the spec and signature. The coder never receives oracle source.";
+              setRunStatus("Ready", "");
+              runSummary.textContent = "Choose a preset or write a task, then start a live repair run.";
+              renderDraftContext();
+            })
+            .catch(function (error) {
+              state.setupReady = false;
+              runFields.disabled = true;
+              runButton.disabled = true;
+              setRunStatus("Setup unavailable", "infrastructurefailed");
+              runSummary.textContent = errorMessage(error, "The browser could not load run setup.");
+              formHelp.textContent = "Reload after the server can provide models and presets.";
+              notice.textContent = "No provider request has been made.";
             });
         }
 
-        function startRun() {
+        function populateSetup(setup) {
+          var models = modelIDs(setup && setup.models);
+          if (models.length === 0) {
+            throw new Error("The server did not provide any configured models.");
+          }
+
+          var defaults = setup && setup.defaults ? setup.defaults : {};
+          fillModelSelect(coderModelSelect, models, stringValue(defaults.coderModel));
+          fillModelSelect(testerModelSelect, models, stringValue(defaults.testerModel));
+          fillPresetButtons(setup && setup.presets);
+        }
+
+        function modelIDs(models) {
+          if (!Array.isArray(models)) {
+            return [];
+          }
+
+          var ids = [];
+          models.forEach(function (model) {
+            var id = stringValue(model && model.id).trim();
+            if (id && ids.indexOf(id) === -1) {
+              ids.push(id);
+            }
+          });
+          return ids;
+        }
+
+        function fillModelSelect(select, models, preferred) {
+          select.replaceChildren();
+          models.forEach(function (model) {
+            var option = document.createElement("option");
+            option.value = model;
+            option.textContent = model;
+            select.append(option);
+          });
+
+          if (preferred && models.indexOf(preferred) !== -1) {
+            select.value = preferred;
+          } else {
+            select.value = models[0];
+          }
+        }
+
+        function fillPresetButtons(presets) {
+          presetButtons.replaceChildren();
+          if (!Array.isArray(presets) || presets.length === 0) {
+            var empty = document.createElement("p");
+            empty.className = "preset-empty";
+            empty.textContent = "No presets are available. Enter a task manually.";
+            presetButtons.append(empty);
+            return;
+          }
+
+          presets.forEach(function (preset) {
+            var button = document.createElement("button");
+            button.type = "button";
+            button.className = "preset-button";
+            button.textContent = stringValue(preset && preset.name) || "Unnamed preset";
+            button.addEventListener("click", function () {
+              applyPreset(preset);
+            });
+            presetButtons.append(button);
+          });
+        }
+
+        function applyPreset(preset) {
+          nameInput.value = stringValue(preset && preset.name);
+          specInput.value = stringValue(preset && preset.spec);
+          signatureInput.value = stringValue(preset && preset.signature);
+          if (!state.run) {
+            renderDraftContext();
+          }
+          runSummary.textContent = "Preset loaded into the editable form. Review it, choose models, then start when ready.";
+        }
+
+        function renderDraftContext() {
+          if (state.run) {
+            return;
+          }
+          taskNameLabel.textContent = nameInput.value.trim() || "Draft task";
+          specText.textContent = specInput.value || "Enter a specification to prepare a run.";
+          signatureText.textContent = signatureInput.value || "No signature entered.";
+          renderPendingOracle();
+        }
+
+        function startRun(event) {
+          event.preventDefault();
+          if (!state.setupReady || !runForm.reportValidity()) {
+            return;
+          }
+
           stopPolling();
           var startGeneration = state.pollGeneration;
           state.leftAttempt = null;
           state.rightAttempt = null;
           state.run = null;
           state.runID = null;
+          state.startRequestID = newRequestID();
           state.cancelRequested = false;
           downloadButton.hidden = true;
           cancelButton.hidden = true;
           cancelButton.disabled = false;
           cancelButton.textContent = "Cancel run";
-          runButton.disabled = true;
-          runButton.textContent = "Starting…";
+          setFormLocked(true);
           setRunStatus("Starting", "running");
           runSummary.textContent = "Creating a run; waiting for the server to confirm it.";
           notice.textContent = "No provider request has been confirmed yet.";
+          modelRoles.hidden = true;
+          renderDraftContext();
           renderComparison();
 
+          var payload = {
+            requestId: state.startRequestID,
+            name: nameInput.value.trim(),
+            spec: specInput.value,
+            signature: signatureInput.value,
+            coderModel: coderModelSelect.value,
+            testerModel: testerModelSelect.value
+          };
+
+          submitStart(payload, startGeneration);
+        }
+
+        function submitStart(payload, startGeneration) {
           fetch("/run", {
             method: "POST",
-            headers: { "Accept": "application/json" },
+            headers: {
+              "Accept": "application/json",
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(payload),
             cache: "no-store"
           })
             .then(readJSON)
@@ -562,21 +892,44 @@
               if (state.pollGeneration !== startGeneration) {
                 return;
               }
-              if (!started || !started.id) {
+              var id = stringValue(started && started.id).trim();
+              if (!id) {
                 throw new Error("The server accepted the run but did not return a run ID.");
               }
-              state.runID = started.id;
+              state.runID = id;
+              state.startRequestID = null;
               cancelButton.hidden = false;
               cancelButton.disabled = false;
               setRunStatus("Running", "running");
-              runSummary.textContent = "Run " + started.id + " is active. Waiting for its first status update.";
+              runSummary.textContent = "Run " + id + " is active. The blind oracle is resolved before candidate attempt 1.";
               pollRun();
             })
             .catch(function (error) {
-              if (state.pollGeneration === startGeneration) {
-                showStartError(error);
+              if (state.pollGeneration !== startGeneration) {
+                return;
               }
+              if (error && typeof error.status === "number") {
+                showStartError(error);
+                return;
+              }
+              setRunStatus("Reconnecting", "running");
+              runSummary.textContent = "The browser could not confirm the start response. Retrying the same request so it can recover the original run ID without creating another run.";
+              notice.textContent = "The form stays locked while the browser reconnects to the server.";
+              scheduleStartRetry(payload, startGeneration);
             });
+        }
+
+        function scheduleStartRetry(payload, startGeneration) {
+          if (state.pollTimer !== null) {
+            window.clearTimeout(state.pollTimer);
+          }
+          state.pollTimer = window.setTimeout(function () {
+            state.pollTimer = null;
+            if (state.pollGeneration !== startGeneration) {
+              return;
+            }
+            submitStart(payload, startGeneration);
+          }, 1000);
         }
 
         function cancelRun() {
@@ -603,7 +956,7 @@
               if (!isCurrentPoll(runID, cancelGeneration)) {
                 return;
               }
-              if (error.status === 409) {
+              if (error && error.status === 409) {
                 return;
               }
               showPollError(error);
@@ -628,8 +981,8 @@
               }
               state.run = run;
               renderRun();
-              if (run.status === "running") {
-                schedulePoll(runID, pollGeneration, 500);
+              if (run && run.status === "running") {
+                schedulePoll(runID, pollGeneration, pollIntervalMilliseconds);
                 return;
               }
               stopPolling();
@@ -637,8 +990,7 @@
               cancelButton.hidden = true;
               cancelButton.disabled = false;
               cancelButton.textContent = "Cancel run";
-              runButton.disabled = false;
-              runButton.textContent = "Run another repair";
+              setFormLocked(false);
               downloadButton.hidden = false;
             })
             .catch(function (error) {
@@ -653,7 +1005,7 @@
             return response.json().catch(function () {
               return {};
             }).then(function (body) {
-              var error = new Error(body.error || "Request failed with status " + response.status);
+              var error = new Error(stringValue(body && body.error) || "Request failed with status " + response.status);
               error.status = response.status;
               throw error;
             });
@@ -683,46 +1035,52 @@
           }, delay);
         }
 
+        function setFormLocked(locked) {
+          runFields.disabled = locked || !state.setupReady;
+          if (locked) {
+            runButton.disabled = true;
+            runButton.textContent = "Run active";
+            return;
+          }
+          runButton.disabled = !state.setupReady;
+          runButton.textContent = state.run ? "Start another repair" : "Start repair";
+        }
+
         function showStartError(error) {
           stopPolling();
-          runButton.disabled = false;
-          runButton.textContent = "Try again";
+          state.runID = null;
+          state.startRequestID = null;
+          state.cancelRequested = false;
           cancelButton.hidden = true;
+          cancelButton.disabled = false;
+          cancelButton.textContent = "Cancel run";
+          setFormLocked(false);
           setRunStatus("Start failed", "infrastructurefailed");
-          runSummary.textContent = error.message || "The run could not be started.";
+          runSummary.textContent = errorMessage(error, "The run could not be started.");
           notice.textContent = "No candidate was created.";
         }
 
         function showPollError(error) {
           stopPolling();
-          if (error.status === 404) {
+          if (error && error.status === 404) {
             state.runID = null;
             state.cancelRequested = false;
             cancelButton.hidden = true;
             cancelButton.disabled = false;
             cancelButton.textContent = "Cancel run";
-            runButton.disabled = false;
-            runButton.textContent = "Run another repair";
-            downloadButton.hidden = true;
+            setFormLocked(false);
+            downloadButton.hidden = !state.run;
             setRunStatus("Run unavailable", "infrastructurefailed");
             runSummary.textContent = "This server no longer stores the active run. It cannot be resumed from this page.";
-            notice.textContent = error.message || "Start a new run if the server has restarted.";
+            notice.textContent = errorMessage(error, "Start a new run if the server has restarted.");
             return;
           }
 
-          runButton.disabled = true;
-          cancelButton.disabled = true;
           setRunStatus("Connection interrupted", "infrastructurefailed");
           runSummary.textContent = "This page cannot confirm whether run " + state.runID + " is still active. Reconnecting…";
-          notice.textContent = error.message || "The latest run state could not be retrieved.";
+          notice.textContent = errorMessage(error, "The latest run state could not be retrieved.");
+          cancelButton.disabled = true;
           schedulePoll(state.runID, state.pollGeneration, 1000);
-        }
-
-        function renderTask(task) {
-          specText.textContent = task.spec || "No task specification was recorded.";
-          signatureText.textContent = task.signature || "No signature was recorded.";
-          oracleLabel.textContent = String(task.oracle || "authored").toUpperCase() + " • FROZEN";
-          oracleCode.textContent = task.testCode || "No oracle source was recorded.";
         }
 
         function renderRun() {
@@ -731,58 +1089,120 @@
             return;
           }
 
-          renderTask(run);
+          renderRunContext(run);
+          renderModelRoles(run);
           if (run.status === "running") {
             renderActiveRun(run);
           } else if (run.status === "passed") {
             setRunStatus("Passed", "passed");
-            runSummary.textContent = "A candidate passed both go build and go test against the frozen oracle.";
-            notice.textContent = "The run finished successfully.";
+            if (isGeneratedOracle(run)) {
+              runSummary.textContent = "The final candidate reached agreement with the frozen blind oracle after Go build and go test. This is not verified correctness.";
+              notice.textContent = "Green means agreement with the frozen blind oracle, not a proof that the specification is correct.";
+            } else {
+              runSummary.textContent = "A candidate passed Go build and go test against the frozen authored oracle.";
+              notice.textContent = "The run finished successfully.";
+            }
           } else if (run.status === "gaveup") {
             setRunStatus("Gave up", "gaveup");
-            runSummary.textContent = "The attempt budget ended without a passing candidate.";
-            notice.textContent = "The visible verifier feedback came from the same frozen oracle.";
+            runSummary.textContent = "The attempt budget ended without a candidate that passed the frozen oracle.";
+            notice.textContent = failureNotice(run);
           } else if (run.status === "canceled") {
             setRunStatus("Canceled", "canceled");
             runSummary.textContent = "Run canceled after " + completedAttemptCount(run) + " completed attempt(s).";
             notice.textContent = "No further candidate was started.";
           } else if (run.status === "timedout") {
             setRunStatus("Timed out", "timedout");
-            runSummary.textContent = run.error || "The configured run time limit ended before a terminal code verdict.";
+            runSummary.textContent = stringValue(run.error) || "The configured run time limit ended before a terminal code verdict.";
             notice.textContent = "This is a run-level timeout, not a candidate verdict.";
+          } else if (run.status === "oraclefailed") {
+            setRunStatus("Oracle failed", "oraclefailed");
+            runSummary.textContent = stringValue(run.error) || "The blind oracle could not be accepted before candidate generation.";
+            notice.textContent = "This is an oracle outcome. No candidate is charged with this failure.";
           } else {
-            setRunStatus(statusLabel(run.status), run.status);
-            runSummary.textContent = run.error || "The run ended without a code verdict.";
+            setRunStatus(statusLabel(run.status), "infrastructurefailed");
+            runSummary.textContent = stringValue(run.error) || "The run ended without a code verdict.";
             notice.textContent = "This is an infrastructure outcome, not a candidate verdict.";
           }
           renderComparison();
         }
 
+        function renderRunContext(run) {
+          taskNameLabel.textContent = stringValue(run.task || run.name) || "Untitled task";
+          specText.textContent = stringValue(run.spec) || "No task specification was recorded.";
+          signatureText.textContent = stringValue(run.signature) || "No signature was recorded.";
+          if (stringValue(run.testCode)) {
+            var oracleName = isGeneratedOracle(run) ? "Generated oracle" : "Authored oracle";
+            oracleLabel.textContent = oracleName.toUpperCase() + " • FROZEN";
+            oracleNote.textContent = isGeneratedOracle(run)
+              ? "This test source was written before candidate attempt 1 from the specification and signature only. It is frozen for the run and never sent to the coder."
+              : "This test source is frozen for the run and never sent to the coder.";
+            oracleCode.textContent = stringValue(run.testCode);
+            return;
+          }
+          renderPendingOracle(run);
+        }
+
+        function renderPendingOracle(run) {
+          var generated = !run || isGeneratedOracle(run) || !stringValue(run.oracle);
+          oracleLabel.textContent = generated ? "GENERATED • PENDING" : "AUTHORED • PENDING";
+          oracleNote.textContent = generated
+            ? "The separate test-writer sees only the specification and signature. The oracle remains pending until it is accepted and frozen before candidate attempt 1."
+            : "The oracle remains pending until the server accepts and freezes it before candidate attempt 1.";
+          oracleCode.textContent = pendingOracleMessage(run);
+        }
+
+        function pendingOracleMessage(run) {
+          if (run && run.stage === "writingoracle") {
+            return "Writing a blind oracle from the specification and signature only…";
+          }
+          if (run && run.stage === "preflightingoracle") {
+            return "Preflighting the blind oracle before any candidate is requested…";
+          }
+          if (run && run.stage === "canceling") {
+            return "Cancellation requested while the oracle was still pending.";
+          }
+          return "Oracle pending — no candidate is allowed to run until an oracle is accepted.";
+        }
+
+        function renderModelRoles(run) {
+          modelRoles.hidden = false;
+          coderModelText.textContent = stringValue(run.coderModel) || coderModelSelect.value || "—";
+          testerModelText.textContent = stringValue(run.testerModel) || testerModelSelect.value || "—";
+        }
+
         function renderActiveRun(run) {
-          var attempt = Number(run.currentAttempt) || completedAttemptCount(run) + 1;
+          var attempt = Number(run.currentAttempt);
           var limit = Number(run.maxAttempts) || "?";
           var timing = runTiming(run);
 
           if (state.cancelRequested && run.stage !== "canceling") {
             setRunStatus("Canceling", "canceling");
-            runSummary.textContent = "Cancellation requested for attempt " + attempt + ". Waiting for the server to confirm it." + timing;
-            notice.textContent = "The page is still observing the run until the server returns a terminal state.";
+            runSummary.textContent = "Cancellation requested. Waiting for the server to finish the current operation." + timing;
+            notice.textContent = "The page continues polling until the server returns a terminal state.";
+          } else if (run.stage === "writingoracle") {
+            setRunStatus("Writing oracle", "running");
+            runSummary.textContent = "Oracle work (attempt 0): the blind test-writer is reading only the spec and pinned signature." + timing;
+            notice.textContent = "Candidate generation is blocked until one oracle is frozen.";
+          } else if (run.stage === "preflightingoracle") {
+            setRunStatus("Preflighting oracle", "running");
+            runSummary.textContent = "Oracle work (attempt 0): checking the generated test source before any candidate is requested." + timing;
+            notice.textContent = "An oracle fault is not charged to the coder.";
           } else if (run.stage === "waitingforprovider") {
-            setRunStatus("Waiting for candidate", "running");
-            runSummary.textContent = "Attempt " + attempt + " of " + limit + ". Waiting for the configured provider to return a candidate." + timing;
-            notice.textContent = "Candidate source and verifier output appear only after Go finishes checking this attempt.";
+            setRunStatus("Waiting for coder", "running");
+            runSummary.textContent = "Candidate attempt " + displayAttempt(attempt, run) + " of " + limit + ": waiting for the configured coder model." + timing;
+            notice.textContent = "The coder receives the spec, signature, and any earlier verifier output — never oracle source.";
           } else if (run.stage === "verifying") {
             setRunStatus("Verifying candidate", "running");
-            runSummary.textContent = "Attempt " + attempt + " of " + limit + ". A candidate was received; Go is building and testing it against the frozen oracle." + timing;
-            notice.textContent = "The candidate source and exact verifier output will appear when this check completes.";
+            runSummary.textContent = "Candidate attempt " + displayAttempt(attempt, run) + " of " + limit + ": Go is building and testing it against the frozen oracle." + timing;
+            notice.textContent = "Candidate source and exact verifier output appear after this verification completes.";
           } else if (run.stage === "canceling") {
             setRunStatus("Canceling", "canceling");
-            runSummary.textContent = "Stop requested for attempt " + attempt + ". Waiting for the server to finish stopping the current operation." + timing;
+            runSummary.textContent = "Stop requested. Waiting for the server to finish stopping the current operation." + timing;
             notice.textContent = "No further candidate will be started after cancellation is accepted.";
           } else {
             setRunStatus("Starting", "running");
-            runSummary.textContent = "Run accepted. Preparing attempt " + attempt + " of " + limit + "." + timing;
-            notice.textContent = "Waiting for the server to begin the first provider request.";
+            runSummary.textContent = "Run accepted. Preparing the blind oracle before candidate attempt 1." + timing;
+            notice.textContent = "Waiting for the server to begin oracle resolution.";
           }
 
           cancelButton.hidden = false;
@@ -793,25 +1213,17 @@
         function renderComparison() {
           var run = state.run;
           if (!run) {
-            controls.hidden = true;
-            clearAttemptPane(panes.left, "Candidate source", "Start a run to show the source sent to Go.", "No candidate yet.");
+            comparisonControls.hidden = true;
+            clearAttemptPane(panes.left, "Candidate source", "Start a run to show a candidate source after Go has checked it.", "No candidate yet.");
             renderFeedback(null, null);
-            clearAttemptPane(panes.right, "Later candidate", "A later candidate appears here when one exists.", "No later candidate yet.");
+            clearAttemptPane(panes.right, "Later candidate", "A later checked candidate appears here when one exists.", "No later candidate yet.");
             return;
           }
 
           var attempts = Array.isArray(run.attempts) ? run.attempts : [];
           if (attempts.length === 0) {
-            controls.hidden = true;
-            if (run.status !== "running") {
-              clearAttemptPane(panes.left, "Candidate source", "No candidate source was completed before this run ended.", "No candidate source was recorded.");
-              renderFeedback(null, null);
-              clearAttemptPane(panes.right, "Later candidate", "No later candidate was recorded.", "No later candidate source was recorded.");
-              return;
-            }
-            clearAttemptPane(panes.left, "Candidate source", pendingCandidateNote(run), pendingCandidateCode(run));
-            renderFeedback(null, null);
-            clearAttemptPane(panes.right, "Later candidate", "No later candidate has been recorded yet.", pendingCandidateCode(run));
+            comparisonControls.hidden = true;
+            renderEmptyComparison(run);
             return;
           }
 
@@ -824,6 +1236,30 @@
           } else {
             clearAttemptPane(panes.right, "Later candidate", "No later candidate was needed or recorded.", "No later candidate.");
           }
+        }
+
+        function renderEmptyComparison(run) {
+          if (run.status === "running" && (run.stage === "writingoracle" || run.stage === "preflightingoracle")) {
+            clearAttemptPane(panes.left, "Candidate source", "Candidate attempts wait for a frozen blind oracle.", "No candidate has been requested.");
+            renderFeedback(null, null);
+            clearAttemptPane(panes.right, "Later candidate", "No candidate can exist until oracle work completes.", "No later candidate yet.");
+            return;
+          }
+          if (run.status === "running") {
+            clearAttemptPane(panes.left, "Candidate source", pendingCandidateNote(run), pendingCandidateCode(run));
+            renderFeedback(null, null);
+            clearAttemptPane(panes.right, "Later candidate", "No later candidate has been recorded yet.", pendingCandidateCode(run));
+            return;
+          }
+          if (run.status === "oraclefailed") {
+            clearAttemptPane(panes.left, "Candidate source", "No candidate was requested because no blind oracle was accepted.", "No candidate source was recorded.");
+            renderFeedback(null, null);
+            clearAttemptPane(panes.right, "Later candidate", "No later candidate can be compared.", "No later candidate source was recorded.");
+            return;
+          }
+          clearAttemptPane(panes.left, "Candidate source", "No candidate source was completed before this run ended.", "No candidate source was recorded.");
+          renderFeedback(null, null);
+          clearAttemptPane(panes.right, "Later candidate", "No later candidate was recorded.", "No later candidate source was recorded.");
         }
 
         function selectAttempts(attempts) {
@@ -846,15 +1282,15 @@
         }
 
         function renderAttemptControls(attempts, left, right) {
-          controls.hidden = attempts.length < 2;
+          comparisonControls.hidden = attempts.length < 2;
           if (attempts.length < 2) {
             return;
           }
-          fillSelect(leftSelect, attempts, left.n);
-          fillSelect(rightSelect, attempts, right.n);
+          fillAttemptSelect(leftSelect, attempts, left.n);
+          fillAttemptSelect(rightSelect, attempts, right.n);
         }
 
-        function fillSelect(select, attempts, selected) {
+        function fillAttemptSelect(select, attempts, selected) {
           select.replaceChildren();
           attempts.forEach(function (attempt) {
             var option = document.createElement("option");
@@ -871,9 +1307,16 @@
           pane.state.textContent = attempt.passed ? "Passed" : "Rejected";
           pane.state.className = "attempt-state " + (attempt.passed ? "passed" : "failed");
           pane.note.textContent = attempt.passed
-            ? "This candidate passed both go build and go test."
-            : "This candidate was rejected by the Go verifier.";
-          pane.code.textContent = attempt.code || "(empty candidate source)";
+            ? passPaneNote(state.run)
+            : "This candidate was rejected by the Go verifier under the frozen oracle.";
+          pane.code.textContent = stringValue(attempt.code) || "(empty candidate source)";
+        }
+
+        function passPaneNote(run) {
+          if (isGeneratedOracle(run)) {
+            return "This candidate agreed with the frozen blind oracle after Go build and go test; that is not a correctness proof.";
+          }
+          return "This candidate passed both Go verification stages against the frozen authored oracle.";
         }
 
         function clearAttemptPane(pane, title, note, code) {
@@ -889,7 +1332,7 @@
           if (!left) {
             panes.feedback.title.textContent = "Verifier feedback";
             panes.feedback.state.textContent = "";
-            panes.feedback.note.textContent = "Compiler or test output appears here after a failed verification.";
+            panes.feedback.note.textContent = "Compiler or test output appears here only after a completed failed verification.";
             panes.feedback.code.textContent = "No verifier output yet.";
             return;
           }
@@ -904,9 +1347,9 @@
 
           panes.feedback.state.textContent = "Rejected";
           panes.feedback.note.textContent = right && right.n === left.n + 1
-            ? "This source and feedback were included in attempt " + right.n + "."
-            : "The immediate next repair prompt received this source and feedback.";
-          panes.feedback.code.textContent = left.output || "No verifier output was recorded.";
+            ? "This exact output was supplied with the earlier source to candidate attempt " + right.n + "."
+            : "The immediate next repair prompt receives this source and exact verifier output.";
+          panes.feedback.code.textContent = stringValue(left.output) || "No verifier output was recorded.";
         }
 
         function firstRejected(attempts) {
@@ -959,6 +1402,13 @@
           return Array.isArray(run.attempts) ? run.attempts.length : 0;
         }
 
+        function displayAttempt(attempt, run) {
+          if (attempt > 0) {
+            return attempt;
+          }
+          return completedAttemptCount(run) + 1;
+        }
+
         function pendingCandidateNote(run) {
           if (run.stage === "verifying") {
             return "A candidate was received and is being checked by Go.";
@@ -966,7 +1416,7 @@
           if (run.stage === "canceling") {
             return "Stopping the current operation before another candidate can be recorded.";
           }
-          return "Waiting for the provider to return a candidate.";
+          return "Waiting for the configured coder model to return a candidate.";
         }
 
         function pendingCandidateCode(run) {
@@ -976,12 +1426,24 @@
           if (run.stage === "canceling") {
             return "Cancellation requested.";
           }
-          return "Waiting for provider response.";
+          return "Waiting for coder response.";
+        }
+
+        function failureNotice(run) {
+          var failureMode = stringValue(run.failureMode);
+          if (failureMode) {
+            return "The frozen oracle remained unchanged. Recorded failure mode: " + failureMode + ".";
+          }
+          return "The visible verifier feedback came from the same frozen oracle.";
+        }
+
+        function isGeneratedOracle(run) {
+          return stringValue(run && run.oracle).toLowerCase() === "generated";
         }
 
         function runTiming(run) {
-          var started = Date.parse(run.startedAt || "");
-          var deadline = Date.parse(run.deadlineAt || "");
+          var started = Date.parse(stringValue(run.startedAt));
+          var deadline = Date.parse(stringValue(run.deadlineAt));
           if (Number.isNaN(started)) {
             return "";
           }
@@ -1012,11 +1474,26 @@
           var url = URL.createObjectURL(blob);
           var link = document.createElement("a");
           link.href = url;
-          link.download = (state.run.id || "repair-run") + ".json";
+          link.download = "repair-loop-run.json";
           document.body.append(link);
           link.click();
           link.remove();
           URL.revokeObjectURL(url);
+        }
+
+        function stringValue(value) {
+          return typeof value === "string" ? value : "";
+        }
+
+        function newRequestID() {
+          if (window.crypto && typeof window.crypto.randomUUID === "function") {
+            return window.crypto.randomUUID().replace(/-/g, "_");
+          }
+          return "browser_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2);
+        }
+
+        function errorMessage(error, fallback) {
+          return error && typeof error.message === "string" && error.message ? error.message : fallback;
         }
       }());
     </script>

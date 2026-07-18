@@ -6,10 +6,19 @@ Branch strategy: `main` (active development and production during the hackathon)
 > **Design change, 2026-07-18 (after F1/C3, before F2).** The oracle is no longer
 > human-authored-only. It is now written *blind to the code* in one of two modes: `authored`
 > (human) or `generated` (a separate test-writer LLM context reading only spec + signature).
-> `generated` is the later showcase and research-inspired variation; `authored` is the control
-> condition and the immediate demo path. New work: **F15–F18, C4, C5**. Amended: **F3, F4,
-> F6, C1**. Phase 0 stays `authored`-only on purpose — prove the coder loop against a
-> known-good fixture before adding a second unproven half.
+> `generated` is now the interactive browser showcase; `authored` remains the terminal control
+> condition. New work identifiers: **F15–F18, C4, C5**. Amended: **F3, F4, F6, C1**. Phase 0
+> stayed `authored`-only on purpose — prove the coder loop against a known-good fixture before
+> adding a second unproven half.
+
+> **Hackathon execution decision, 2026-07-18.** The immediate browser milestone is now one
+> interactive generated-oracle vertical slice: a user supplies a spec and pinned Go signature;
+> a test-writer produces and freezes the oracle before a separate code-writer starts; the page
+> shows both artifacts and the repair trace. This deliberately brings together **F15**, the
+> essential preflight portion of **F16**, **F17**, and the useful browser-input portion of
+> **F12**. It landed as small, separately tested changes. Do not build a frontend-only
+> form over the fixed task, accept client-supplied test source, or hardcode provider model IDs.
+> Presets fill the same editable inputs; they never auto-run.
 
 Status markers: `[ ]` not started · `[~]` in progress · `[x]` done.
 Work the phases in order. **Phase 0 must be green before anything in Phase 3+ begins.**
@@ -27,8 +36,9 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   and `gofmt` passed. Tests include a standard-library `httptest` completion, retry, and
   timeout coverage. Non-success provider responses expose their HTTP status without retaining
   their body.
-  The tracked `.env.example` and ignored local `.env` provide the four variables. The
-  configured-provider smoke test is opt-in: `LLM_LIVE_TEST=run go test -tags=integration
+  The tracked `.env.example` and ignored local `.env` document the required provider variables
+  plus optional model allowlist and role defaults. The configured-provider smoke test is opt-in:
+  `LLM_LIVE_TEST=run go test -tags=integration
   ./internal/llm -run '^TestLiveCompletion$' -count=1 -v`. It requires HTTPS, is excluded
   from ordinary test runs, and must pass before F1 is marked done.
   Live verification passed on 2026-07-18: the opt-in HTTPS probe returned non-empty text.
@@ -49,7 +59,8 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
 - [x] **F3 — verifier.** `internal/repair`: write `go.mod`, model-produced `solution.go`, and
   the frozen `solution_test.go` from `domain.Task` into an `os.MkdirTemp` module. Write source
   verbatim; do not run `go mod tidy`, install dependencies, or repair it. Run `go build ./...`,
-  then `go test ./...` only after a successful build, under one injected verifier timeout.
+  then `go test -timeout <verifier timeout> ./...` only after a successful build, under one
+  injected verifier timeout.
   A non-zero command exit is feedback with that command's raw combined output, not an infra
   error. Verifier timeout is failed-attempt feedback; caller cancellation, temp/write/cleanup,
   and command-launch failures bubble as errors. Verification (2026-07-18): passing code,
@@ -75,32 +86,38 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   `internal/repair`), `go vet ./...`, and `git diff --check` passed. No live provider call was
   required.
 
-### Phase 1 — The test-writer, then loop quality (still terminal)
+### Phase 1 — Blind test-writer and interactive path
 
-- [ ] **F15 — Generated oracle (the design change).** Add `domain.OracleMode` +
-  `Task.Oracle`; add pure `prompt.TestPrompt(spec, signature)` requiring a complete
-  `package solution` test file, stdlib `testing` only, table-driven, no implementation; add
-  `repair.resolveOracle` to obtain and freeze one accepted oracle before attempt 1; extend
-  `Repair` to take coder + tester `llm.LLM` values. F16 may retry rejected oracle candidates,
-  but only before any coder call exists.
+- [x] **F15 — Generated oracle (the design change).** `domain.OracleMode` + `Task.Oracle`,
+  pure `prompt.TestPrompt(spec, signature)`, and `repair.resolveOracle` now resolve and freeze
+  the generated test source before attempt 1. `Repair` takes explicit coder + tester `llm.LLM`
+  values and reports one accepted oracle to the run store before it asks the coder. Authored mode
+  remains a supported control and permits a nil tester.
   Depends on: F4.
-  Non-negotiable: `TestPrompt` takes spec and signature only — no parameter may carry candidate
-  code — and nothing after `resolveOracle` may regenerate the oracle. Add a unit test asserting
-  the coder prompt builders never receive `TestCode`.
-  Verify — run the same task in both modes; both reach a verdict.
+  Structural checks prove tester → frozen oracle → coder ordering, no test source in coder
+  prompts, no candidate source in tester prompts, and no regeneration after acceptance.
 
-- [ ] **F16 — Oracle preflight + fault attribution.** A non-compiling generated oracle must
-  never be charged to the coder. `go build` ignores `*_test.go`, so preflight the generated
-  oracle before any coder call by compiling it with `go test -c` against a signature-derived
-  stub (built, never run). A preflight failure is an oracle fault; regenerate up to an injected
-  cap, then end `oraclefailed` if no candidate is accepted. Use `go/parser` if needed to derive
-  the stub safely from the pinned signature.
+- [x] **F16 — Oracle preflight + fault attribution.** Generated tests are parsed and compiled
+  with `go test -c` against a parsed signature-derived stub before any coder call; the test
+  binary is never run. A rejected candidate oracle retries only up to the injected
+  `-oracle-attempts` cap. Exhaustion returns typed `OracleFailureError`, which becomes terminal
+  `oraclefailed`, never a candidate attempt. Preflight also rejects source without a runnable
+  `Test` function, a direct call to the pinned function, or a testing failure method, as well as
+  build constraints, `TestMain`, `init`, test skips, and direct `os.Exit`; it type-checks the
+  pinned stub and keeps caller cancellation/setup/preflight-timeout failures as ordinary
+  infrastructure errors.
   Depends on: F15.
 
-- [ ] **F17 — Split coder and test-writer models.** `LLM_MODEL_CODER` / `LLM_MODEL_TESTER`,
-  both falling back to `LLM_MODEL`. Construct two `llm.LLM` values at the composition root;
-  `internal/llm` stays role-agnostic. Mitigates correlated misreading of an ambiguous spec.
+- [x] **F17 — Split coder and test-writer models.** `LLM_MODEL_CODER` /
+  `LLM_MODEL_TESTER` fall back to `LLM_MODEL`; `LLM_MODELS` is an optional comma-separated
+  browser allowlist. Role selection happens at the composition root. Role-agnostic
+  `llm.ModelCatalog` creates one reusable client per allowed ID and rejects arbitrary IDs.
   Depends on: F15.
+  Same-model role selection remains legal, but the browser records both selected IDs so a saved
+  run is interpretable.
+  Verification (2026-07-18): `go build ./...`, `go test ./...`, `go test -race ./...`,
+  `go test -cover ./...`, `go vet ./...`, `gofmt`, inline-JavaScript syntax, the no-HTML-
+  injection static check, and `git diff --check` passed. No live provider request was made.
 
 - [ ] **F18 — Failure mode signal.** On `gaveup`, intersect failing test names across attempts
   and record `persistent` (a possible interpretation mismatch worth inspecting) or `varied`
@@ -123,63 +140,69 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
 
 ### Phase 2 — State (the bridge)
 
-- [x] **F7 — Run orchestration + store.** `internal/run.Store` starts authored-oracle
-  `Repair` calls in goroutines and returns stable IDs immediately. Its synchronous reporter
-  appends `domain.Attempt` values under a mutex; `GetRun` returns a copied snapshot. State is an
-  in-memory `map[string]*Run` for the lifetime of the process. The JSON shape is frozen with
-  `signature`, `maxAttempts`, `oracle`, `testCode`, `stage`, `currentAttempt`, `startedAt`,
-  `deadlineAt`, `failureMode`, and `error`. Statuses are `running`, `passed`, `gaveup`,
-  `canceled`, `timedout`, `infrastructurefailed`, and the F15/F16-reserved `oraclefailed`.
+- [x] **F7 — Run orchestration + store.** `internal/run.Store` starts per-run role clients in
+  goroutines and returns stable IDs immediately. Its synchronous progress reporter records the
+  accepted frozen oracle and appends `domain.Attempt` values under a mutex; `GetRun` returns a
+  copied snapshot. State is an in-memory `map[string]*Run` for the lifetime of the process. The
+  JSON record includes the submitted spec/signature, oracle, selected `coderModel`/
+  `testerModel`, attempt budget, lifecycle fields, and result.
   Depends on: F4.
-  Current runs set `oracle` to `authored`; `failureMode` remains empty until F18. Each browser
-  run owns a bounded context and private cancel function. Its live stage moves from `starting`
-  to `waitingforprovider` and `verifying`; cancellation is `canceling`, and all terminal runs
-  are `complete`. A total deadline becomes `timedout`, while a per-call provider timeout remains
-  an infrastructure outcome.
-  Verification (2026-07-18): scripted coder tests exercised real Go verification through
-  failed → passed, provider infrastructure failure, input validation, immutable snapshots,
-  provider-wait and verifier stages, explicit cancellation, and whole-run timeout.
+  A browser run owns a bounded context and private cancel function. Generated runs move through
+  `writingoracle` and `preflightingoracle` with `currentAttempt: 0`, then candidate provider
+  and verifier stages; cancellation is `canceling`, and all terminal runs are `complete`.
+  The store rejects a second live run server-side, not only in the UI. A total deadline becomes
+  `timedout`, while a per-call provider timeout remains an infrastructure outcome.
+  Verification (2026-07-18): scripted runs cover generated fail → pass, authored control,
+  frozen oracle snapshots, tester cancellation/timeout, `oraclefailed`, verifier staging,
+  immutable snapshots, and one-live-run protection.
 
 ### Phase 3 — Web server
 
 - [x] **F8 — HTTP layer.** `internal/server` + `cmd/repair -serve` use Go 1.22+ `net/http`
-  routing. `GET /task` returns the injected fixed authored task for display; `POST /run` returns
-  `202 {"id":"run_..."}` and starts it; `POST /run/{id}/cancel` accepts a live cancellation;
-  and `GET /run/{id}` returns the live `Run` snapshot. Unknown IDs return `404
-  {"error":"run not found"}`; cancel requests after a terminal outcome return `409`. JSON
-  responses are `Cache-Control: no-store`. There is no task request body or task selector until
-  F6/F12.
+  routing. `GET /setup` returns safe model IDs, role defaults, and editable presets. `POST /run`
+  accepts a strict JSON spec/signature/role-selection request plus a browser-generated
+  idempotency token and starts a server-constructed generated-oracle task. Retrying the same
+  token returns the original run ID rather than creating another run. `POST /run/{id}/cancel`
+  accepts a live cancellation; `GET /run/{id}`
+  returns the live `Run` snapshot. Unknown IDs return `404`; a second live start or terminal
+  cancel returns `409`. JSON responses are `Cache-Control: no-store`.
   Depends on: F7.
-  Verification (2026-07-18): handler tests serve the embedded page, fixed task context, start a
-  real verifier-backed scripted run and poll it to `passed`; a context-aware scripted provider
-  proves the cancel endpoint reaches `canceled` and handles unknown/terminal IDs correctly.
+  The server rejects unknown JSON fields (including `testCode`), invalid/type-invalid signatures,
+  oversized fields, malformed request IDs, and model IDs outside the configured catalog with
+  `400`.
+  Verification (2026-07-18): handler tests serve the page/setup, start and poll a real
+  verifier-backed generated-oracle run, reject unsafe input, recover the same ID after an
+  idempotent retry, enforce one live run, and cancel a context-aware test-writer call.
 
 ### Phase 4 — UI (the flashy payoff)
 
 - [x] **F9 — Embedded UI.** `internal/server/index.html`, embedded by
   `internal/server/assets.go`, is plain HTML/CSS/vanilla JS—no framework, CDN, npm, or build
-  step. It preloads the fixed task and frozen **authored** oracle, polls live runs every 500ms,
-  and uses DOM text nodes for all source/output. Its comparison-first desktop layout places a
-  rejected candidate, exact verifier feedback, and a later candidate side by side; selectors
-  support other attempt pairs and terminal runs can be downloaded as JSON. It names the actual
-  live stage (provider wait, Go verification, or cancellation), shows elapsed time against the
-  server-owned run deadline, binds polls to one run ID/generation so late responses cannot
-  overwrite a later run, and keeps a second run disabled while server state is uncertain. It
-  shows first-attempt passes, exhaustion, cancellation, timeout, and infrastructure failure
-  honestly; it does not fabricate a live red → green result.
+  step. Its compact form accepts an optional name, required spec/signature, and separate allowed
+  code-writer/test-writer models; preset buttons only populate those editable fields. It locks
+  the form while a run is active, then shows role metadata, pending → frozen oracle source, and
+  a comparison-first candidate/feedback/later-candidate layout. Attempt selectors and full JSON
+  download preserve the observed record.
   Depends on: F8.
-  Verification (2026-07-18): the inline script parsed successfully, static checks found no
-  external asset/framework or `innerHTML` usage, and the server test serves the embedded page.
-  A real browser/provider rehearsal remains opt-in and was not run during this change.
+  It names oracle writing/preflight, coder wait, Go verification, cancellation, timeout, and
+  oracle failure truthfully. A generated green state says a candidate satisfied a frozen blind
+  oracle, never verified correctness. A lost start response retries the same idempotency token while the
+  form remains locked; polls are bound to one ID/generation and preserve observation on ambiguous
+  network failures. Verification (2026-07-18): the inline script parsed, static checks
+  found no external assets/framework or HTML injection API, and the server test serves it.
 
 ### Phase 5 — Stretch (only if the above is solid)
 
 - [ ] **F10 — Attempt diffs.** Highlight what changed between consecutive attempts.
 - [ ] **F11 — SSE streaming.** Push attempts the instant they land instead of polling.
-- [ ] **F12 — Task input in UI.** Let the user type a spec (and optionally an authored oracle)
-  rather than picking a file. Typing a spec and getting a generated oracle back is the natural
-  demo of the whole idea. The UI must never let one submission produce both the code and its
-  own tests from a single context (see C1).
+- [x] **F12 — Task input in UI.** The browser lets a user type a spec and required pinned signature rather
+  than picking a file. The immediate generated-mode path accepts neither client test source nor
+  a client-selected oracle mode: the server constructs `OracleGenerated`, resolves it before any
+  candidate exists, then freezes it. A compact preset list fills those same editable fields and
+  never auto-runs. The UI exposes separate allowed test-writer and code-writer model selections;
+  provider-specific IDs come from configured allowlist data, never hardcoded browser values.
+  Server-side length/type/model validation, idempotent start recovery, and one-live-run
+  protection are implemented.
 - [ ] **F13 — Property-test check.** Offer property/metamorphic tests as the oracle instead of
   example tests — a stronger check and the more novel angle. Especially valuable in `generated`
   mode: properties are harder to satisfy by special-casing than examples, which narrows the gap
@@ -203,9 +226,10 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
 - [ ] **C4 — Correlated misreading in `generated` mode.** Coder and test-writer read the same
   ambiguous prose; the same model family can misread it identically, producing agreement on the
   wrong behaviour and a green run for the wrong reason. Mitigate with distinct role models
-  (F17) and stronger oracles (F13). Never report a green `generated` run as "verified" — it is
-  evidence that two readings agreed. Keep `authored` mode working as the control condition that
-  makes this measurable.
+  (F17) and stronger oracles (F13). Never report a green `generated` run as "verified" — a
+  candidate satisfied a frozen oracle generated blind to every candidate, and later candidates
+  may have used Go feedback. Keep `authored` mode working as the control condition that makes
+  this measurable.
 
 - [ ] **C5 — Keep later comparisons interpretable.** During an optional spec-comparison run,
   a repair prompt tuned hard enough to rescue any spec can hide disagreement. Keep prompts fixed
@@ -251,7 +275,9 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   stage, current attempt, start/deadline timestamps, a server-owned whole-run context, and a
   real `POST /run/{id}/cancel` path. Do not relabel a user cancellation or configured whole-run
   deadline as a candidate failure. On ambiguous poll failure, keep the start action disabled and
-  reconnect rather than orphaning a run in the UI; ignore callbacks tied to an earlier run.
+  reconnect rather than orphaning a run in the UI; on an ambiguous start response, retry the same
+  idempotency token to recover its run ID rather than accidentally creating a second run. Ignore
+  callbacks tied to an earlier run.
   Verification (2026-07-18): `go build ./...`, `go test ./...`, server cancel-route tests, and
   run-store provider-wait/verifier/cancel/timeout tests passed. No live provider call was needed.
 

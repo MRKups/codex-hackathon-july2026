@@ -8,6 +8,7 @@ import (
 var (
 	_ func(string, string) string                 = FirstPrompt
 	_ func(string, string, string, string) string = RepairPrompt
+	_ func(string, string) string                 = TestPrompt
 	_ func(string) string                         = ExtractGoCode
 )
 
@@ -66,6 +67,36 @@ func TestRepairPrompt(t *testing.T) {
 	assertContains(t, got, signature)
 	if strings.Contains(got, oracle) {
 		t.Fatalf("RepairPrompt included oracle source: %q", got)
+	}
+}
+
+func TestTestPrompt(t *testing.T) {
+	t.Parallel()
+
+	const (
+		spec      = "SPEC_SENTINEL: Return the sum of two integers."
+		signature = "func Solve(left, right int) int"
+		candidate = "package solution\n\nfunc Solve(left, right int) int { return left + right }"
+	)
+
+	got := TestPrompt(spec, signature)
+	for _, want := range []string{
+		spec,
+		signature,
+		"independent Go test oracle",
+		"not seen a solution",
+		"one complete Go test source file",
+		"`package solution`",
+		"standard-library `testing` package",
+		"table-driven",
+		"no implementation",
+		"Markdown fences",
+		"explanation",
+	} {
+		assertContainsOnce(t, got, want)
+	}
+	if strings.Contains(got, candidate) {
+		t.Fatalf("TestPrompt included candidate source: %q", got)
 	}
 }
 

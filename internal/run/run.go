@@ -28,20 +28,43 @@ const (
 )
 
 // Phase describes the active operation within a running repair loop. Terminal runs always use
-// PhaseComplete. Attempts are only appended after their Go verification has finished, so phase
-// makes the period before the first completed attempt observable to API clients.
+// PhaseComplete. Oracle phases deliberately use CurrentAttempt == 0: no candidate exists yet.
 type Phase string
 
 const (
 	PhaseStarting           Phase = "starting"
+	PhaseWritingOracle      Phase = "writingoracle"
+	PhasePreflightingOracle Phase = "preflightingoracle"
 	PhaseWaitingForProvider Phase = "waitingforprovider"
 	PhaseVerifying          Phase = "verifying"
 	PhaseCanceling          Phase = "canceling"
 	PhaseComplete           Phase = "complete"
 )
 
-// Run is the JSON snapshot consumed by the browser. TestCode is the frozen oracle shown to the
-// viewer; Repair never passes it to the coder prompt builders.
+// ErrRunActive is returned when a caller tries to start a second live run in one store. The UI
+// also disables its start control, but the store is the authority that prevents parallel paid
+// provider calls through the HTTP API.
+var ErrRunActive = errors.New("a repair run is already active")
+
+// Config holds injected execution limits for every run in a Store.
+type Config struct {
+	MaxAttempts    int
+	OracleAttempts int
+	TestTimeout    time.Duration
+	RunTimeout     time.Duration
+}
+
+// Roles is the per-run pair of independently selected model clients. Tester is required only
+// for generated-oracle tasks. Model names are display metadata captured in the run record.
+type Roles struct {
+	Coder       llm.LLM
+	Tester      llm.LLM
+	CoderModel  string
+	TesterModel string
+}
+
+// Run is the JSON snapshot consumed by the browser. TestCode is the accepted frozen oracle
+// shown to the viewer; Repair never passes it to the coder prompt builders.
 type Run struct {
 	ID             string           `json:"id"`
 	Task           string           `json:"task"`
@@ -49,6 +72,8 @@ type Run struct {
 	Signature      string           `json:"signature"`
 	Oracle         string           `json:"oracle"`
 	TestCode       string           `json:"testCode"`
+	CoderModel     string           `json:"coderModel"`
+	TesterModel    string           `json:"testerModel"`
 	MaxAttempts    int              `json:"maxAttempts"`
 	Status         Status           `json:"status"`
 	Stage          Phase            `json:"stage"`
@@ -62,78 +87,126 @@ type Run struct {
 
 // Store starts repair loops and retains their snapshots for the lifetime of the process.
 type Store struct {
-	coder       llm.LLM
-	maxAttempts int
-	testTimeout time.Duration
-	runTimeout  time.Duration
+	config Config
 
-	mu      sync.RWMutex
-	nextID  uint64
-	runs    map[string]*Run
-	cancels map[string]context.CancelFunc
+	mu          sync.RWMutex
+	nextID      uint64
+	runs        map[string]*Run
+	cancels     map[string]context.CancelFunc
+	activeRunID string
 }
 
-// NewStore constructs an in-memory store with the repair-loop settings chosen by the caller.
-func NewStore(coder llm.LLM, maxAttempts int, testTimeout, runTimeout time.Duration) (*Store, error) {
-	if coder == nil {
-		return nil, errors.New("coder is required")
-	}
-	if maxAttempts <= 0 {
+// NewStore constructs an in-memory store with caller-selected execution limits.
+func NewStore(config Config) (*Store, error) {
+	if config.MaxAttempts <= 0 {
 		return nil, errors.New("max attempts must be greater than zero")
 	}
-	if testTimeout <= 0 {
+	if config.OracleAttempts <= 0 {
+		return nil, errors.New("oracle attempts must be greater than zero")
+	}
+	if config.TestTimeout <= 0 {
 		return nil, errors.New("verifier timeout must be greater than zero")
 	}
-	if runTimeout <= 0 {
+	if config.RunTimeout <= 0 {
 		return nil, errors.New("run timeout must be greater than zero")
 	}
 
 	return &Store{
-		coder:       coder,
-		maxAttempts: maxAttempts,
-		testTimeout: testTimeout,
-		runTimeout:  runTimeout,
-		runs:        make(map[string]*Run),
-		cancels:     make(map[string]context.CancelFunc),
+		config:  config,
+		runs:    make(map[string]*Run),
+		cancels: make(map[string]context.CancelFunc),
 	}, nil
 }
 
-// StartRun records a new authored-oracle run and starts the repair loop in a goroutine.
-func (store *Store) StartRun(task domain.Task) (string, error) {
-	if strings.TrimSpace(task.Name) == "" {
-		return "", errors.New("task name is required")
+// StartRun records a new task and starts its repair loop in a goroutine. The store accepts the
+// already-resolved role clients instead of holding a global coder, which makes model selection
+// part of the immutable record for this particular run.
+func (store *Store) StartRun(task domain.Task, roles Roles) (string, error) {
+	mode, err := validateStart(task, roles)
+	if err != nil {
+		return "", err
 	}
-	if strings.TrimSpace(task.TestCode) == "" {
-		return "", errors.New("task test code is required")
-	}
+	task.Oracle = mode
 
 	startedAt := time.Now().UTC()
-	deadlineAt := startedAt.Add(store.runTimeout)
-	ctx, cancel := context.WithDeadline(context.Background(), deadlineAt)
+	deadlineAt := startedAt.Add(store.config.RunTimeout)
 
 	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.activeRunID != "" {
+		return "", ErrRunActive
+	}
+
+	ctx, cancel := context.WithDeadline(context.Background(), deadlineAt)
 	store.nextID++
 	id := fmt.Sprintf("run_%06d", store.nextID)
+	currentAttempt := 1
+	if mode == domain.OracleGenerated {
+		currentAttempt = 0
+	}
+	testCode := ""
+	if mode == domain.OracleAuthored {
+		testCode = task.TestCode
+	}
 	store.runs[id] = &Run{
 		ID:             id,
 		Task:           task.Name,
 		Spec:           task.Spec,
 		Signature:      task.Signature,
-		Oracle:         "authored",
-		TestCode:       task.TestCode,
-		MaxAttempts:    store.maxAttempts,
+		Oracle:         string(mode),
+		TestCode:       testCode,
+		CoderModel:     roles.CoderModel,
+		TesterModel:    roles.TesterModel,
+		MaxAttempts:    store.config.MaxAttempts,
 		Status:         StatusRunning,
 		Stage:          PhaseStarting,
-		CurrentAttempt: 1,
+		CurrentAttempt: currentAttempt,
 		StartedAt:      startedAt,
 		DeadlineAt:     deadlineAt,
 		Attempts:       make([]domain.Attempt, 0),
 	}
 	store.cancels[id] = cancel
-	store.mu.Unlock()
+	store.activeRunID = id
 
-	go store.execute(ctx, cancel, id, task)
+	go store.execute(ctx, cancel, id, task, roles)
 	return id, nil
+}
+
+func validateStart(task domain.Task, roles Roles) (domain.OracleMode, error) {
+	if strings.TrimSpace(task.Name) == "" {
+		return "", errors.New("task name is required")
+	}
+	if strings.TrimSpace(task.Spec) == "" {
+		return "", errors.New("task spec is required")
+	}
+	if strings.TrimSpace(task.Signature) == "" {
+		return "", errors.New("task signature is required")
+	}
+	if err := domain.ValidateSignature(task.Signature); err != nil {
+		return "", fmt.Errorf("task signature is invalid: %w", err)
+	}
+	if roles.Coder == nil {
+		return "", errors.New("coder is required")
+	}
+
+	mode := task.Oracle
+	if mode == "" {
+		mode = domain.OracleAuthored
+	}
+	switch mode {
+	case domain.OracleAuthored:
+		if strings.TrimSpace(task.TestCode) == "" {
+			return "", errors.New("task test code is required")
+		}
+	case domain.OracleGenerated:
+		if roles.Tester == nil {
+			return "", errors.New("test writer is required for a generated oracle")
+		}
+	default:
+		return "", fmt.Errorf("unknown oracle mode %q", task.Oracle)
+	}
+
+	return mode, nil
 }
 
 // GetRun returns a copy of the latest snapshot for id.
@@ -179,24 +252,39 @@ func (store *Store) CancelRun(id string) (found, canceled bool) {
 	return true, true
 }
 
-func (store *Store) execute(ctx context.Context, cancel context.CancelFunc, id string, task domain.Task) {
+func (store *Store) execute(ctx context.Context, cancel context.CancelFunc, id string, task domain.Task, roles Roles) {
 	defer cancel()
 
+	var tester llm.LLM
+	if roles.Tester != nil {
+		tester = progressTester{tester: roles.Tester, store: store, id: id}
+	}
 	final, err := repair.Repair(
 		ctx,
-		progressCoder{coder: store.coder, store: store, id: id},
+		progressCoder{coder: roles.Coder, store: store, id: id},
+		tester,
 		task,
-		store.maxAttempts,
-		store.testTimeout,
-		func(attempt domain.Attempt) error {
-			store.appendAttempt(id, attempt)
-			return nil
+		store.config.MaxAttempts,
+		store.config.TestTimeout,
+		store.config.OracleAttempts,
+		repair.ProgressReporter{
+			OracleResolved: func(testCode string) error {
+				store.setOracle(id, testCode)
+				return nil
+			},
+			AttemptFinished: func(attempt domain.Attempt) error {
+				store.appendAttempt(id, attempt)
+				return nil
+			},
 		},
 	)
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	delete(store.cancels, id)
+	if store.activeRunID == id {
+		store.activeRunID = ""
+	}
 
 	stored, found := store.runs[id]
 	if !found {
@@ -210,7 +298,13 @@ func (store *Store) execute(ctx context.Context, cancel context.CancelFunc, id s
 	}
 	if ctx.Err() == context.DeadlineExceeded {
 		stored.Status = StatusTimedOut
-		stored.Error = fmt.Sprintf("run timed out after %s", store.runTimeout)
+		stored.Error = fmt.Sprintf("run timed out after %s", store.config.RunTimeout)
+		return
+	}
+	var oracleFailure *repair.OracleFailureError
+	if errors.As(err, &oracleFailure) {
+		stored.Status = StatusOracleFailed
+		stored.Error = oracleFailure.Error()
 		return
 	}
 	if err != nil {
@@ -234,7 +328,23 @@ func (store *Store) setPhase(id string, phase Phase) {
 		return
 	}
 	stored.Stage = phase
-	stored.CurrentAttempt = len(stored.Attempts) + 1
+	switch phase {
+	case PhaseWritingOracle, PhasePreflightingOracle:
+		stored.CurrentAttempt = 0
+	default:
+		stored.CurrentAttempt = len(stored.Attempts) + 1
+	}
+}
+
+func (store *Store) setOracle(id, testCode string) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	stored, found := store.runs[id]
+	if !found || stored.Status != StatusRunning || stored.Stage == PhaseCanceling {
+		return
+	}
+	stored.TestCode = testCode
 }
 
 func (store *Store) appendAttempt(id string, attempt domain.Attempt) {
@@ -246,6 +356,21 @@ func (store *Store) appendAttempt(id string, attempt domain.Attempt) {
 		return
 	}
 	stored.Attempts = append(stored.Attempts, attempt)
+}
+
+type progressTester struct {
+	id     string
+	store  *Store
+	tester llm.LLM
+}
+
+func (tester progressTester) Complete(ctx context.Context, prompt string) (string, error) {
+	tester.store.setPhase(tester.id, PhaseWritingOracle)
+	text, err := tester.tester.Complete(ctx, prompt)
+	if err == nil {
+		tester.store.setPhase(tester.id, PhasePreflightingOracle)
+	}
+	return text, err
 }
 
 type progressCoder struct {

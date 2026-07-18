@@ -1,163 +1,329 @@
 package server
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"codex-hackathon-july2026/internal/domain"
+	"codex-hackathon-july2026/internal/llm"
 	"codex-hackathon-july2026/internal/run"
 )
 
-func TestNewServesBrowserAndRunAPI(t *testing.T) {
-	store, err := run.NewStore(staticLLM{response: `package solution
-
-func Increment(value int) int {
-	return value + 1
-}
-`}, 1, 10*time.Second, time.Minute)
-	if err != nil {
-		t.Fatalf("NewStore() error = %v", err)
-	}
-	task := incrementTask()
-	handler, err := New(store, task)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
+func TestNewServesInteractiveGeneratedOracleAPI(t *testing.T) {
+	handler := newHandler(t, providerFor(t, func(model string) string {
+		switch model {
+		case "test-model":
+			return incrementTestCode
+		case "code-model":
+			return correctIncrementCode
+		default:
+			t.Fatalf("unexpected provider model %q", model)
+			return ""
+		}
+	}))
 
 	page := httptest.NewRecorder()
 	handler.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/", nil))
 	if page.Code != http.StatusOK {
 		t.Fatalf("GET / status = %d, want %d", page.Code, http.StatusOK)
 	}
-	if !strings.Contains(page.Body.String(), "Repair Loop") {
-		t.Fatalf("GET / body did not contain page title: %q", page.Body.String())
+	if !strings.Contains(page.Body.String(), "Configure a run") {
+		t.Fatalf("GET / body did not contain interactive task editor")
 	}
 
-	taskPage := httptest.NewRecorder()
-	handler.ServeHTTP(taskPage, httptest.NewRequest(http.MethodGet, "/task", nil))
-	if taskPage.Code != http.StatusOK {
-		t.Fatalf("GET /task status = %d, want %d", taskPage.Code, http.StatusOK)
+	setupPage := httptest.NewRecorder()
+	handler.ServeHTTP(setupPage, httptest.NewRequest(http.MethodGet, "/setup", nil))
+	if setupPage.Code != http.StatusOK {
+		t.Fatalf("GET /setup status = %d, want %d", setupPage.Code, http.StatusOK)
 	}
-	if got := taskPage.Header().Get("Cache-Control"); got != "no-store" {
-		t.Fatalf("GET /task Cache-Control = %q, want no-store", got)
+	if got := setupPage.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("GET /setup Cache-Control = %q, want no-store", got)
 	}
-	var taskSnapshot taskResponse
-	if err := json.NewDecoder(taskPage.Body).Decode(&taskSnapshot); err != nil {
-		t.Fatalf("decode task response: %v", err)
+	var setup setupResponse
+	if err := json.NewDecoder(setupPage.Body).Decode(&setup); err != nil {
+		t.Fatalf("decode setup response: %v", err)
 	}
-	if taskSnapshot.Task != task.Name || taskSnapshot.Spec != task.Spec || taskSnapshot.Signature != task.Signature || taskSnapshot.TestCode != task.TestCode {
-		t.Fatalf("GET /task = %#v, want injected task %#v", taskSnapshot, task)
+	if len(setup.Models) != 2 || setup.Models[0].ID != "code-model" || setup.Models[1].ID != "test-model" {
+		t.Fatalf("setup models = %#v, want configured allowlist", setup.Models)
 	}
-	if taskSnapshot.Oracle != "authored" {
-		t.Fatalf("GET /task oracle = %q, want authored", taskSnapshot.Oracle)
+	if setup.Defaults != (ModelDefaults{CoderModel: "code-model", TesterModel: "test-model"}) {
+		t.Fatalf("setup defaults = %#v", setup.Defaults)
 	}
-
-	start := httptest.NewRecorder()
-	handler.ServeHTTP(start, httptest.NewRequest(http.MethodPost, "/run", nil))
-	if start.Code != http.StatusAccepted {
-		t.Fatalf("POST /run status = %d, want %d; body = %s", start.Code, http.StatusAccepted, start.Body.String())
+	if len(setup.Presets) != 1 || setup.Presets[0].Name != "increment" {
+		t.Fatalf("setup presets = %#v", setup.Presets)
 	}
 
-	var started startResponse
-	if err := json.NewDecoder(start.Body).Decode(&started); err != nil {
-		t.Fatalf("decode start response: %v", err)
-	}
-	if started.ID == "" {
-		t.Fatal("POST /run returned an empty id")
-	}
-
+	started := startGeneratedRun(t, handler, runRequest{
+		Name:        "custom-increment",
+		Spec:        "Return the input integer increased by one.",
+		Signature:   "func Increment(value int) int",
+		CoderModel:  "code-model",
+		TesterModel: "test-model",
+	})
 	got := waitForRun(t, handler, started.ID)
 	if got.Status != run.StatusPassed {
-		t.Fatalf("GET /run status = %q, want %q; error = %q", got.Status, run.StatusPassed, got.Error)
+		t.Fatalf("GET /run status = %q, want passed; error = %q", got.Status, got.Error)
+	}
+	if got.Oracle != "generated" || got.TestCode != incrementTestCode {
+		t.Fatalf("run frozen oracle = mode %q source %q", got.Oracle, got.TestCode)
+	}
+	if got.CoderModel != "code-model" || got.TesterModel != "test-model" {
+		t.Fatalf("run models = coder %q tester %q", got.CoderModel, got.TesterModel)
 	}
 	if len(got.Attempts) != 1 || !got.Attempts[0].Passed {
 		t.Fatalf("GET /run attempts = %#v, want one passing attempt", got.Attempts)
 	}
 }
 
-func TestRunAPIRejectsUnknownRun(t *testing.T) {
-	store, err := run.NewStore(staticLLM{}, 1, time.Second, time.Minute)
-	if err != nil {
-		t.Fatalf("NewStore() error = %v", err)
-	}
-	handler, err := New(store, incrementTask())
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
+func TestRunAPIRejectsInvalidCustomInput(t *testing.T) {
+	handler := newHandler(t, providerFor(t, func(string) string { return incrementTestCode }))
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "unknown model",
+			body: `{"spec":"Return one.","signature":"func One() int","coderModel":"missing","testerModel":"test-model"}`,
+		},
+		{
+			name: "test code is forbidden",
+			body: `{"spec":"Return one.","signature":"func One() int","coderModel":"code-model","testerModel":"test-model","testCode":"package solution"}`,
+		},
+		{
+			name: "bad signature",
+			body: `{"spec":"Return one.","signature":"not a function","coderModel":"code-model","testerModel":"test-model"}`,
+		},
+		{
+			name: "type-invalid signature",
+			body: `{"spec":"Return one.","signature":"func One(value MissingType) int","coderModel":"code-model","testerModel":"test-model"}`,
+		},
+		{
+			name: "invalid request ID",
+			body: `{"requestId":"not allowed!","spec":"Return one.","signature":"func One() int","coderModel":"code-model","testerModel":"test-model"}`,
+		},
+		{
+			name: "multiple values",
+			body: `{} {}`,
+		},
 	}
 
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/run", strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("POST /run status = %d, want 400; body = %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestRunAPIReusesRequestIDWithoutStartingAnotherRun(t *testing.T) {
+	var mu sync.Mutex
+	providerCalls := 0
+	handler := newHandler(t, providerFor(t, func(model string) string {
+		mu.Lock()
+		providerCalls++
+		mu.Unlock()
+		switch model {
+		case "test-model":
+			return incrementTestCode
+		case "code-model":
+			return correctIncrementCode
+		default:
+			t.Fatalf("unexpected provider model %q", model)
+			return ""
+		}
+	}))
+
+	input := validRunRequest()
+	input.RequestID = "browser_start_001"
+	first := startGeneratedRun(t, handler, input)
+	firstRun := waitForRun(t, handler, first.ID)
+	if firstRun.Status != run.StatusPassed {
+		t.Fatalf("first run status = %q, want passed; error = %q", firstRun.Status, firstRun.Error)
+	}
+
+	second := startGeneratedRun(t, handler, input)
+	if second.ID != first.ID {
+		t.Fatalf("retried request ID returned %q, want original %q", second.ID, first.ID)
+	}
+	mu.Lock()
+	gotProviderCalls := providerCalls
+	mu.Unlock()
+	if gotProviderCalls != 2 {
+		t.Fatalf("provider calls = %d, want one tester + one coder for the original run only", gotProviderCalls)
+	}
+}
+
+func TestRunAPIRejectsUnknownRun(t *testing.T) {
+	handler := newHandler(t, providerFor(t, func(string) string { return incrementTestCode }))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/run/missing", nil))
 	if response.Code != http.StatusNotFound {
-		t.Fatalf("GET /run/missing status = %d, want %d", response.Code, http.StatusNotFound)
+		t.Fatalf("GET /run/missing status = %d, want 404", response.Code)
 	}
 }
 
-func TestRunAPICancelsActiveRun(t *testing.T) {
-	model := &blockingLLM{started: make(chan struct{})}
-	store, err := run.NewStore(model, 1, time.Second, time.Minute)
-	if err != nil {
-		t.Fatalf("NewStore() error = %v", err)
-	}
-	handler, err := New(store, incrementTask())
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
+func TestRunAPICancelsActiveTestWriterAndRejectsSecondStart(t *testing.T) {
+	started := make(chan struct{})
+	var once sync.Once
+	provider := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		model := readModel(t, request)
+		if model == "test-model" {
+			once.Do(func() { close(started) })
+			<-request.Context().Done()
+			return
+		}
+		writeCompletion(t, writer, correctIncrementCode)
+	}))
+	defer provider.Close()
 
-	start := httptest.NewRecorder()
-	handler.ServeHTTP(start, httptest.NewRequest(http.MethodPost, "/run", nil))
-	if start.Code != http.StatusAccepted {
-		t.Fatalf("POST /run status = %d, want %d; body = %s", start.Code, http.StatusAccepted, start.Body.String())
-	}
-	var started startResponse
-	if err := json.NewDecoder(start.Body).Decode(&started); err != nil {
-		t.Fatalf("decode start response: %v", err)
-	}
-	if started.ID == "" {
-		t.Fatal("POST /run returned an empty id")
-	}
-
+	handler := newHandler(t, provider)
+	first := startGeneratedRun(t, handler, validRunRequest())
 	select {
-	case <-model.started:
+	case <-started:
 	case <-time.After(15 * time.Second):
-		t.Fatal("provider call did not start")
+		t.Fatal("test-writer provider request did not start")
+	}
+
+	second := httptest.NewRecorder()
+	body, err := json.Marshal(validRunRequest())
+	if err != nil {
+		t.Fatalf("marshal second run request: %v", err)
+	}
+	secondRequest := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	secondRequest.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(second, secondRequest)
+	if second.Code != http.StatusConflict {
+		t.Fatalf("second POST /run status = %d, want 409; body = %s", second.Code, second.Body.String())
 	}
 
 	cancel := httptest.NewRecorder()
-	handler.ServeHTTP(cancel, httptest.NewRequest(http.MethodPost, "/run/"+started.ID+"/cancel", nil))
+	handler.ServeHTTP(cancel, httptest.NewRequest(http.MethodPost, "/run/"+first.ID+"/cancel", nil))
 	if cancel.Code != http.StatusAccepted {
-		t.Fatalf("POST /run/{id}/cancel status = %d, want %d; body = %s", cancel.Code, http.StatusAccepted, cancel.Body.String())
+		t.Fatalf("POST /run/{id}/cancel status = %d, want 202; body = %s", cancel.Code, cancel.Body.String())
 	}
-	got := waitForRun(t, handler, started.ID)
+	got := waitForRun(t, handler, first.ID)
 	if got.Status != run.StatusCanceled {
-		t.Fatalf("canceled run status = %q, want %q; error = %q", got.Status, run.StatusCanceled, got.Error)
+		t.Fatalf("canceled run status = %q, want canceled; error = %q", got.Status, got.Error)
 	}
 	if got.Stage != run.PhaseComplete {
-		t.Fatalf("canceled run stage = %q, want %q", got.Stage, run.PhaseComplete)
+		t.Fatalf("canceled run stage = %q, want complete", got.Stage)
 	}
 
 	terminalCancel := httptest.NewRecorder()
-	handler.ServeHTTP(terminalCancel, httptest.NewRequest(http.MethodPost, "/run/"+started.ID+"/cancel", nil))
+	handler.ServeHTTP(terminalCancel, httptest.NewRequest(http.MethodPost, "/run/"+first.ID+"/cancel", nil))
 	if terminalCancel.Code != http.StatusConflict {
-		t.Fatalf("POST /run/{id}/cancel after terminal state = %d, want %d", terminalCancel.Code, http.StatusConflict)
-	}
-
-	missingCancel := httptest.NewRecorder()
-	handler.ServeHTTP(missingCancel, httptest.NewRequest(http.MethodPost, "/run/missing/cancel", nil))
-	if missingCancel.Code != http.StatusNotFound {
-		t.Fatalf("POST /run/missing/cancel status = %d, want %d", missingCancel.Code, http.StatusNotFound)
+		t.Fatalf("terminal cancel status = %d, want 409", terminalCancel.Code)
 	}
 }
 
-func TestNewRejectsNilStore(t *testing.T) {
-	if _, err := New(nil, incrementTask()); err == nil {
-		t.Fatal("New(nil, task) error = nil, want validation error")
+func TestNewRejectsIncompleteConfig(t *testing.T) {
+	if _, err := New(Config{}); err == nil {
+		t.Fatal("New(Config{}) error = nil, want validation error")
 	}
+}
+
+func newHandler(t *testing.T, provider *httptest.Server) http.Handler {
+	t.Helper()
+	catalog, err := llm.NewModelCatalog(llm.Config{
+		BaseURL: provider.URL,
+		APIKey:  "test-key",
+		Model:   "code-model",
+		Timeout: time.Second,
+	}, []string{"code-model", "test-model"})
+	if err != nil {
+		t.Fatalf("NewModelCatalog() error = %v", err)
+	}
+	store, err := run.NewStore(run.Config{
+		MaxAttempts:    1,
+		OracleAttempts: 1,
+		TestTimeout:    10 * time.Second,
+		RunTimeout:     time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	handler, err := New(Config{
+		Store:  store,
+		Models: catalog,
+		Defaults: ModelDefaults{
+			CoderModel:  "code-model",
+			TesterModel: "test-model",
+		},
+		Presets: []Preset{{
+			Name:      "increment",
+			Spec:      "Return the input integer increased by one.",
+			Signature: "func Increment(value int) int",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return handler
+}
+
+func providerFor(t *testing.T, responseForModel func(string) string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writeCompletion(t, writer, responseForModel(readModel(t, request)))
+	}))
+}
+
+func readModel(t *testing.T, request *http.Request) string {
+	t.Helper()
+	var body struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+		t.Errorf("decode provider request: %v", err)
+	}
+	return body.Model
+}
+
+func writeCompletion(t *testing.T, writer http.ResponseWriter, content string) {
+	t.Helper()
+	writer.Header().Set("Content-Type", "application/json")
+	response := map[string]any{
+		"choices": []any{map[string]any{
+			"message": map[string]string{"role": "assistant", "content": content},
+		}},
+	}
+	if err := json.NewEncoder(writer).Encode(response); err != nil {
+		t.Errorf("encode provider response: %v", err)
+	}
+}
+
+func startGeneratedRun(t *testing.T, handler http.Handler, input runRequest) startResponse {
+	t.Helper()
+	body, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("marshal run request: %v", err)
+	}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("POST /run status = %d, want 202; body = %s", response.Code, response.Body.String())
+	}
+	var started startResponse
+	if err := json.NewDecoder(response.Body).Decode(&started); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+	if started.ID == "" {
+		t.Fatal("POST /run returned an empty ID")
+	}
+	return started
 }
 
 func waitForRun(t *testing.T, handler http.Handler, id string) run.Run {
@@ -167,7 +333,7 @@ func waitForRun(t *testing.T, handler http.Handler, id string) run.Run {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/run/"+id, nil))
 		if response.Code != http.StatusOK {
-			t.Fatalf("GET /run/%s status = %d, want %d", id, response.Code, http.StatusOK)
+			t.Fatalf("GET /run/%s status = %d, want 200", id, response.Code)
 		}
 
 		var got run.Run
@@ -183,33 +349,17 @@ func waitForRun(t *testing.T, handler http.Handler, id string) run.Run {
 	return run.Run{}
 }
 
-type staticLLM struct {
-	response string
-}
-
-func (model staticLLM) Complete(_ context.Context, _ string) (string, error) {
-	if model.response == "" {
-		return "", errors.New("unexpected completion request")
+func validRunRequest() runRequest {
+	return runRequest{
+		Name:        "custom-increment",
+		Spec:        "Return the input integer increased by one.",
+		Signature:   "func Increment(value int) int",
+		CoderModel:  "code-model",
+		TesterModel: "test-model",
 	}
-	return model.response, nil
 }
 
-type blockingLLM struct {
-	started chan struct{}
-}
-
-func (model *blockingLLM) Complete(ctx context.Context, _ string) (string, error) {
-	close(model.started)
-	<-ctx.Done()
-	return "", ctx.Err()
-}
-
-func incrementTask() domain.Task {
-	return domain.Task{
-		Name:      "increment",
-		Spec:      "Return the input integer increased by one.",
-		Signature: "func Increment(value int) int",
-		TestCode: `package solution
+const incrementTestCode = `package solution
 
 import "testing"
 
@@ -218,6 +368,11 @@ func TestIncrement(t *testing.T) {
 		t.Fatalf("Increment(2) = %d, want 3", got)
 	}
 }
-`,
-	}
+`
+
+const correctIncrementCode = `package solution
+
+func Increment(value int) int {
+	return value + 1
 }
+`

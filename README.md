@@ -1,70 +1,80 @@
 # Repair Loop
 
-Repair Loop is a small, stdlib-first Go hackathon prototype for a visible
-**generate → verify → repair** workflow. An LLM writes a candidate Go solution; the Go toolchain
-checks it against a frozen oracle; raw compiler or test feedback becomes the next repair prompt.
+Repair Loop is a small, stdlib-first Go prototype for a visible
+**specify → generate → verify → repair** workflow.
 
-The browser demo makes that evidence legible: it shows the task and unchanged oracle, the exact
-extracted candidate source verified by Go, the exact verifier output, and any later candidate
-that passed.
-It uses plain HTML, CSS, and browser JavaScript—no frontend framework, npm, CDN, or build step.
+In the browser path, you write a specification and a pinned Go function signature. A blind
+test-writer context creates `solution_test.go` from those two inputs only; the app compiles that
+oracle against a stub and freezes it before a separate code-writer context creates any candidate.
+Go then builds and tests each candidate. Failed compiler or test output becomes the next coder
+prompt, while the oracle itself never moves.
 
-The current executable demo uses one fixed, human-authored task: `SplitCents`, which divides
-cents among recipients and gives any remainder to the earliest recipients. Task loading and the
-later generated-oracle mode are not user-facing yet.
+The page is deliberately plain HTML, CSS, and browser JavaScript—no framework, npm, CDN, or
+frontend build step. It makes the actual evidence visible: submitted spec, frozen test source,
+selected role models, candidate code, raw Go feedback, and later attempts.
 
 ## What a result means
 
-The current demo runs in **authored-oracle mode**. The fixed `solution_test.go` was written before
-the LLM writes code, is shown in the browser, and never enters a coder prompt. A green result
-therefore means the candidate passed that independent Go oracle.
+| Mode | Green means |
+|---|---|
+| Browser generated oracle | A candidate—possibly repaired using Go feedback—satisfied an oracle generated blind to every candidate. This is not a proof of correctness. |
+| Terminal authored control | The candidate passed a fixed human-authored oracle. This is stronger evidence of correctness. |
 
-The loop never edits the oracle. It only extracts an unambiguous code fence when present, writes
-the candidate verbatim to a disposable module, runs `go build ./...` and then `go test ./...`,
-and supplies a failed stage's output to the next attempt.
+The browser never accepts test source from a user submission. The test writer never receives
+candidate code, and the code writer never receives test source—only the output of Go running it.
 
 ## Prerequisites
 
 - Go 1.26 or newer, with `go` on your `PATH`.
 - An OpenAI-compatible Chat Completions provider, network access, and credentials for a live run.
-- A modern web browser for the visual demo.
+- A modern browser for the visual demo.
 - Bash or Zsh for the shown `source .env` commands. In POSIX `sh`, use `. ./.env` instead.
 
-There are no third-party Go dependencies, and no Node/npm or frontend build tooling to install.
+There are no third-party Go dependencies and no Node/npm tooling to install.
+
+Generated candidates and generated oracles are compiled locally. This is a trusted-local
+hackathon tool, not a sandbox for untrusted public input.
 
 ## Set up the provider
 
-Copy the tracked template once, fill in your own provider values, then load them into the shell:
+Copy the tracked template once, fill in your provider values, then load them into the shell:
 
 ```bash
 [ -f .env ] || cp .env.example .env
-# Edit .env and set LLM_BASE_URL, LLM_API_KEY, LLM_MODEL, and LLM_TIMEOUT.
+# Edit .env, then load it:
 source .env
 ```
 
-`LLM_BASE_URL` is an OpenAI-compatible API base URL. It may include a version path such as `/v1`;
-the client appends `/chat/completions`. Keep `.env` private: it is ignored by Git and must never
-be committed. Use HTTPS for every non-local provider.
+Required settings are `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, and `LLM_TIMEOUT`.
+`LLM_BASE_URL` may include a version path such as `/v1`; the client appends
+`/chat/completions`. Keep `.env` private: it is ignored by Git and must never be committed.
+Use HTTPS for every non-local provider.
 
-The program validates this configuration before it starts either demo. Starting the browser
-server itself does not call the provider—the provider call begins only when you click **Run live
-repair**.
+The browser’s model dropdowns are local configuration, not a provider model-discovery API:
+
+```bash
+# One option for both roles:
+export LLM_MODEL="your-provider-model"
+
+# Or offer a safe list and choose defaults for each role:
+export LLM_MODELS="fast-model,strong-model"
+export LLM_MODEL_CODER="strong-model"
+export LLM_MODEL_TESTER="fast-model"
+```
+
+If `LLM_MODELS` is blank, the app offers `LLM_MODEL` plus any explicitly configured role defaults.
+If it is set, it must contain the effective coder and test-writer defaults. Every option uses the
+same configured provider endpoint and credential. Selecting the same model for both roles is
+legal; choosing different models can reduce correlated interpretations of a spec.
 
 ## Build and verify
 
-Compile and run the project tests without contacting a provider:
+These commands do not contact a provider:
 
 ```bash
 go build ./...
 go test ./...
 go vet ./...
-```
-
-To build a named executable instead of using `go run`:
-
-```bash
-go build -o repair ./cmd/repair
-./repair -h
 ```
 
 Optional development checks:
@@ -75,67 +85,81 @@ go test -cover ./...
 gofmt -l $(rg --files -g '*.go')
 ```
 
-The last command uses `rg` (ripgrep); it is not required to run the project.
+To build a named executable:
+
+```bash
+go build -o repair ./cmd/repair
+./repair -h
+```
 
 ## Run the browser demo
 
-This is the recommended hackathon presentation path:
+Start the local server:
 
 ```bash
 source .env
-go run ./cmd/repair -serve -attempts 3 -verifier-timeout 10s -run-timeout 90s
+go run ./cmd/repair -serve -attempts 3 -oracle-attempts 2 -verifier-timeout 10s -run-timeout 2m30s
 ```
 
-Open [http://127.0.0.1:8080](http://127.0.0.1:8080) and click **Run live repair**. To use a
-different free local address, add `-addr 127.0.0.1:8090` (the default is `127.0.0.1:8080`).
-Press `Ctrl-C` in the terminal to stop the server.
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080). Use `-addr 127.0.0.1:8090` for another
+local address. Press `Ctrl-C` in the terminal to stop the server.
 
-While a run is live, the page says whether it is waiting for the provider or Go is verifying a
-candidate, shows elapsed time against the run limit, and offers **Cancel run**. The three limits
-serve different purposes: `LLM_TIMEOUT` bounds one provider completion, `-verifier-timeout`
-bounds one `go build`/`go test` verification, and `-run-timeout` bounds the whole browser run
-(90 seconds by default). A canceled or timed-out run is shown as such; neither is presented as a
-verdict on the candidate code.
+To use the app:
 
-### Notes for judges
+1. Click a preset to fill the form, or write your own specification.
+2. Enter one bodyless Go function signature, such as
+   `func Normalize(input string) (string, error)`.
+3. Choose a code-writer and blind test-writer from the configured dropdowns.
+4. Click **Start repair**.
+5. Watch the page write and preflight the oracle before candidate attempt 1, then inspect the
+   frozen tests, code attempts, and exact Go feedback.
+6. After a terminal state, click **Download run JSON** to keep the final evidence snapshot.
 
-The top panels establish the inputs: the task specification and the frozen authored
-`solution_test.go` oracle. The oracle remains unchanged for the entire run and is never shown to
-the coder.
+The server permits one live run at a time. Browser starts use a local idempotency token, so a lost
+start response is retried as the same request instead of creating a second run. The page shows whether it is writing/preflighting the
+oracle, waiting for the coder, or verifying Go code, and it offers **Cancel run**. The limits are
+independent: `LLM_TIMEOUT` bounds one completion, `-verifier-timeout` bounds one candidate
+verification, `-oracle-attempts` bounds generated-oracle retries before any candidate exists,
+and `-run-timeout` bounds the entire browser run. A cancellation, timeout, or `oraclefailed`
+state is not a verdict on candidate code.
 
-Each rejected card contains the exact extracted candidate source written to `solution.go` and
-verified by Go. The middle panel contains the raw Go verifier feedback that the loop supplied to
-the next repair prompt. If a later card is green, its source passed both `go build` and `go test`
-against that same oracle.
+## Notes for judges
 
-After a terminal result, **Download run JSON** saves the spec, frozen oracle, exact candidates,
-verifier outputs, phase/timing data, and final state as a portable record of the run.
+The top of a completed browser run establishes what happened in order: the submitted spec and
+signature, the two selected model roles, and the test source independently generated and frozen
+before candidate code existed. The code writer never receives that source.
 
-A live provider can legitimately solve this small task on its first attempt, or can exhaust the
-attempt budget. The UI shows either result honestly; it does not manufacture a red → green story.
+Each candidate pane is the exact extracted source written to `solution.go`. The feedback pane is
+the raw output from `go build` or `go test` that informed the next repair prompt. A later
+candidate is checked against the same frozen oracle. A generated-oracle green state means a
+candidate satisfied an oracle generated blind to every candidate; later candidates may have used
+Go feedback to converge on it. The UI intentionally does not call this verification.
 
-## Run the terminal demo
+`Download run JSON` records the accepted evidence: input, selected models, frozen oracle,
+completed attempts, verifier output, timestamps, and terminal state. It is a final snapshot, not
+an event log of rejected oracle candidates or provider wrapper replies. A live model may pass on its first try; that is shown honestly.
+For a repeatable repair trace, save a genuinely observed multi-attempt run rather than inventing
+an initial failure.
 
-The terminal remains useful for a quick provider check or a compact walkthrough:
+## Run the authored terminal control
+
+The terminal command keeps the original fixed SplitCents task and human-authored oracle. It is a
+quick provider check and a control path separate from the browser’s generated oracle:
 
 ```bash
 source .env
 go run ./cmd/repair -attempts 3 -verifier-timeout 10s
 ```
 
-It prints each verified attempt and ends as one of:
-
-- `passed` — a candidate satisfied the frozen oracle.
-- `gave up` — the attempt limit was reached with a real failed verification.
-- `provider or verifier infrastructure failure` — configuration, provider, filesystem, process,
-  or caller failure; this is not a verdict on the candidate code.
+It prints each verified attempt and ends as `passed`, `gave up`, or an infrastructure failure.
 
 ## Optional live provider smoke check
 
-This explicit integration test sends one short, harmless completion request (with at most one
-retry) and does not print the response or secrets:
+This explicit integration test sends one short completion request (with at most one retry) and
+does not print a response or secrets:
 
 ```bash
+source .env
 LLM_LIVE_TEST=run go test -tags=integration ./internal/llm -run '^TestLiveCompletion$' -count=1 -v
 ```
 

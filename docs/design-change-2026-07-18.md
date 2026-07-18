@@ -1,7 +1,7 @@
 # Design Change — Blind Oracle Modes (2026-07-18)
 
-**Status:** adopted. The authored-oracle path F1–F4 and browser path F7–F9 are now implemented;
-F15–F18 remain future work.
+**Status:** adopted and implemented through the interactive generated-oracle path: F15, F16,
+F17, and the useful browser-input part of F12 are complete. F18 remains optional future work.
 **Landed after:** F1, C3. **Landed before:** F2.
 **Scope:** build the hackathon flow first; the research-inspired diagnostics come after it works.
 **Files changed:** `AGENTS.md`, `README.md`, `docs/go-repair-loop.md`,
@@ -10,7 +10,7 @@ F15–F18 remain future work.
 
 This document explains *why* the project's central rule changed and the research-inspired
 question the completed flow can later help explore. It does not turn the hackathon into a
-separate research platform. Read it before picking up F15 or later generated-mode work. If this document
+separate research platform. Read it before changing generated-mode work. If this document
 and an older comment in the code disagree, this document wins.
 
 ---
@@ -53,12 +53,11 @@ Two legal modes, both frozen before attempt 1:
 | Mode | Oracle author | Sees | A green run means |
 |---|---|---|---|
 | `authored` | a human, ahead of the run | the task | the code satisfies an independent oracle — evidence of correctness |
-| `generated` | a second LLM context | spec + signature **only** | two independent readings of the spec agreed — evidence of *spec convergence* |
+| `generated` | a second LLM context | spec + signature **only** | a candidate satisfied a frozen blind oracle; only the first candidate and oracle are independent readings |
 
-`generated` is the later showcase and research-inspired variation. `authored` is retained as
-the **control condition** and the first mode to build: the same harness with a fixed external
-oracle. Keeping both makes comparison possible, so `authored` mode must not be deleted or left
-to rot.
+`generated` is the interactive browser showcase and research-inspired variation. `authored` is
+retained as the **control condition** and terminal known-good path. Keeping both makes comparison
+possible, so `authored` mode must not be deleted or left to rot.
 
 ## 4. Why this is the interesting change
 
@@ -113,9 +112,11 @@ to need it, the design is wrong — stop and flag it rather than changing the si
 
 The honest caveat, which must stay in the docs and out of any claim made about results:
 
-In `generated` mode the coder and the test-writer read the **same ambiguous prose**. The same
+In `generated` mode the initial coder and test-writer read the **same ambiguous prose**. The same
 model family can misread it the same way twice — producing code and tests that agree on the
-wrong behaviour, and a green run for the wrong reason.
+wrong behaviour, and a green run for the wrong reason. After a failed attempt, the coder also
+uses Go feedback, so a later green primarily shows convergence to the frozen oracle rather than
+two independent readings.
 
 Mitigations, in order of strength:
 
@@ -124,9 +125,10 @@ Mitigations, in order of strength:
 - **Stronger oracles** (F13): properties are harder to satisfy by accident than examples.
 - **`authored` mode as control**: run the same task both ways and compare.
 
-Language discipline: **never describe a green `generated` run as "verified."** It is evidence
-that two readings agreed. A green `authored` run is the stronger claim. This distinction is not
-pedantry — it is the difference between a result and a demo.
+Language discipline: **never describe a green `generated` run as "verified."** It means a
+candidate satisfied an oracle generated blind to every candidate. A green `authored` run is the
+stronger claim. This distinction is not pedantry — it is the difference between a result and a
+demo.
 
 ## 7. Second known weakness: tuning away the signal (C5)
 
@@ -149,21 +151,18 @@ broken. The authored oracle is a known-good fixture; earn the loop against it fi
 The one forward-looking requirement: `Repair` should already take its coder as an explicit
 parameter, so F15 can deliberately extend the API with a test-writer after its contracts exist.
 
-### Phase 1 — the test-writer arrives
+### Phase 1 — implemented test-writer and role split
 
-- **F15 — Generated oracle.** Add `domain.OracleMode` + `Task.Oracle`; add pure
-  `prompt.TestPrompt(spec, signature)`; add `repair.resolveOracle` to obtain and freeze one
-  accepted oracle before attempt 1; extend `Repair` to take coder + tester `llm.LLM` values.
-  F16 may retry rejected oracle candidates only before any coder call exists. Add a unit test
-  asserting the coder prompt builders never receive `TestCode`.
-- **F16 — Oracle preflight + fault attribution.** A non-compiling generated oracle must never be
-  charged to the coder. `go build` ignores `*_test.go`, so compile the generated test with
-  `go test -c` against a signature-derived stub before spending a coder generation. A preflight
-  failure is an oracle fault; regenerate up to an injected cap; exhausting it ends the run
-  `oraclefailed`, which is neither a pass nor a coder failure. Use `go/parser` if needed to
-  derive the stub safely from the pinned signature; the stub is built, never run.
-- **F17 — Split role models.** Two `llm.LLM` values at the composition root.
-  `internal/llm` stays role-agnostic — role separation is the caller's job.
+- **F15:** `domain.OracleMode`, pure `TestPrompt`, `resolveOracle`, frozen-oracle progress,
+  and explicit coder/tester `llm.LLM` values are implemented. Generated mode starts only after
+  an accepted test source exists.
+- **F16:** a parsed signature-derived stub plus `go test -c` preflights generated tests under the
+  verifier timeout. Candidate oracles retry only before coder generation; cap exhaustion becomes
+  `oraclefailed`. Generated oracle source without a runnable test, a direct call to the pinned
+  function, or a testing failure method—and source with build constraints, `TestMain`, `init`,
+  test skips, or direct `os.Exit`—is rejected rather than trusted.
+- **F17:** the composition root configures separate role defaults and a safe `LLM_MODELS`
+  allowlist. `internal/llm` remains role-agnostic.
 - **F18 — Failure mode signal.** On `gaveup`, intersect failing test names across attempts;
   record `persistent` or `varied`. This is an optional diagnostic after the dual-mode flow
   works, not a dependency for the hackathon demo.
@@ -189,8 +188,7 @@ type Task struct {
 ```
 
 ```go
-// internal/run — browser lifecycle fields added by B1 are part of the current contract,
-// alongside fields reserved for F15/F18.
+// internal/run — browser lifecycle fields are part of the current contract.
 type Run struct {
     ID             string           `json:"id"`
     Task           string           `json:"task"`
@@ -198,9 +196,11 @@ type Run struct {
     Signature      string           `json:"signature"`
     Oracle         string           `json:"oracle"`      // NEW: "authored" | "generated"
     TestCode       string           `json:"testCode"`    // NEW: the frozen oracle, for display
+    CoderModel     string           `json:"coderModel"`
+    TesterModel    string           `json:"testerModel"`
     MaxAttempts    int              `json:"maxAttempts"`
     Status         Status           `json:"status"`      // running | passed | gaveup | canceled | timedout | infrastructurefailed | oraclefailed
-    Stage          Phase            `json:"stage"`       // starting | waitingforprovider | verifying | canceling | complete
+    Stage          Phase            `json:"stage"`       // starting | writingoracle | preflightingoracle | waitingforprovider | verifying | canceling | complete
     CurrentAttempt int              `json:"currentAttempt"`
     StartedAt      time.Time        `json:"startedAt"`
     DeadlineAt     time.Time        `json:"deadlineAt"`
@@ -233,19 +233,23 @@ does on its own.
 
 | Variable | Role |
 |---|---|
-| `LLM_MODEL` | default for any role without an override |
+| `LLM_MODEL` | required default for any role without an override |
+| `LLM_MODELS` | optional comma-separated browser model allowlist |
 | `LLM_MODEL_CODER` | writes candidate solutions |
 | `LLM_MODEL_TESTER` | writes oracles in `generated` mode |
 
-`.env.example` has not yet been updated with the two role variables. It should be, alongside F17.
+`.env.example` includes the default model, allowlist, and two role settings. The browser receives only allowed IDs and role
+defaults, never provider credentials or endpoint configuration.
 
 ### UI (F9)
 
-The implemented page shows the spec and frozen **authored** oracle side by side before a provider
-call, then compares real candidate source and verifier feedback. Final state is green on
-`passed`, red on `gaveup`, and neutral on `infrastructurefailed`; `oraclefailed` and
-`failureMode` are reserved for F15/F16 and F18. In generated mode, the same placement will let a
-viewer inspect the frozen independently derived oracle without claiming it is verification.
+The implemented page accepts an editable spec and required signature, with presets and separate
+allowed role-model selectors. It shows a generated oracle as pending while it is written and
+preflighted, then displays the frozen source before any candidate appears. Final state is green
+on `passed`, red on `gaveup`, and neutral on `oraclefailed`, timeout, or infrastructure failure.
+Generated green copy says a candidate satisfied a frozen oracle generated blind to every
+candidate; later candidates may have used Go feedback to converge on it. It never calls this
+verification.
 
 ## 9. What "done" looks like now
 
@@ -275,6 +279,8 @@ deterministic.
 - That makes a new diagnostic available: persistent code/oracle disagreement can expose an
   interpretation mismatch worth inspecting.
 - `authored` mode stays as the control condition. It is not legacy.
-- Phase 0 remains `authored`-only on purpose. The test-writer is F15, in Phase 1, after the
-  end-to-end terminal flow is working.
-- A green `generated` run means *two readings agreed*, not *verified*. Keep saying it that way.
+- Phase 0 remains the protected authored terminal control; the browser now adds the blind
+  generated-oracle path on top of that working loop.
+- A green `generated` run means a candidate satisfied a frozen blind oracle, not *verified*
+  correctness. Only the first candidate and oracle were independently generated readings; later
+  candidates may use Go feedback. Keep saying it that way.

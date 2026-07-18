@@ -5,6 +5,8 @@ import "strings"
 
 const sourceFileRequirements = "Return only one complete Go source file. The file must declare `package solution`, implement the required signature exactly, use only the Go standard library, and contain no tests, `main` program, Markdown fences, or explanation.\n"
 
+const testFileRequirements = "Return only one complete Go test source file. The file must declare `package solution`, import and use the standard-library `testing` package, define table-driven `func Test...` functions for the required signature, use only the Go standard library, and contain no implementation, `main` program, Markdown fences, or explanation.\n"
+
 // FirstPrompt asks a coder to produce the first candidate for a task.
 // Its primitive inputs deliberately leave no route for oracle source to enter the prompt.
 func FirstPrompt(spec, signature string) string {
@@ -22,6 +24,14 @@ func RepairPrompt(spec, signature, previousCode, verifierOutput string) string {
 		"<previous-candidate>\n" + previousCode + "\n</previous-candidate>\n\n" +
 		"<verifier-output>\n" + verifierOutput + "\n</verifier-output>\n\n" +
 		sourceFileRequirements
+}
+
+// TestPrompt asks a blind test-writer to produce an independent oracle. Its primitive inputs
+// deliberately leave no route for candidate code to enter the prompt.
+func TestPrompt(spec, signature string) string {
+	return "Write an independent Go test oracle for this task. You have not seen a solution; derive the tests only from the task specification and required signature. Do not assume, describe, or write a candidate implementation.\n\n" +
+		taskDetails(spec, signature) +
+		testFileRequirements
 }
 
 func taskDetails(spec, signature string) string {

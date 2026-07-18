@@ -11,7 +11,7 @@ import (
 	"codex-hackathon-july2026/internal/domain"
 )
 
-func TestStoreRecordsRepairAttemptsAndPasses(t *testing.T) {
+func TestStoreRecordsGeneratedOracleAndRepairAttempts(t *testing.T) {
 	wrongCode := `package solution
 
 func Increment(value int) int {
@@ -24,15 +24,16 @@ func Increment(value int) int {
 	return value + 1
 }
 `
-	store, err := NewStore(&scriptedLLM{responses: []scriptedResponse{
-		{text: wrongCode},
-		{text: correctCode},
-	}}, 2, 10*time.Second, time.Minute)
-	if err != nil {
-		t.Fatalf("NewStore() error = %v", err)
-	}
+	tester := &scriptedLLM{responses: []scriptedResponse{{text: incrementTestCode}}}
+	coder := &scriptedLLM{responses: []scriptedResponse{{text: wrongCode}, {text: correctCode}}}
+	store := newStore(t, Config{MaxAttempts: 2, OracleAttempts: 1, TestTimeout: 10 * time.Second, RunTimeout: time.Minute})
 
-	id, err := store.StartRun(incrementTask())
+	id, err := store.StartRun(generatedIncrementTask(), Roles{
+		Coder:       coder,
+		Tester:      tester,
+		CoderModel:  "code-model",
+		TesterModel: "test-model",
+	})
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
 	}
@@ -41,26 +42,29 @@ func Increment(value int) int {
 	if got.Status != StatusPassed {
 		t.Fatalf("run status = %q, want %q; error = %q", got.Status, StatusPassed, got.Error)
 	}
-	if got.Stage != PhaseComplete {
-		t.Fatalf("run stage = %q, want %q", got.Stage, PhaseComplete)
+	if got.Oracle != string(domain.OracleGenerated) {
+		t.Fatalf("run oracle = %q, want generated", got.Oracle)
 	}
-	if got.StartedAt.IsZero() || got.DeadlineAt.IsZero() || !got.DeadlineAt.After(got.StartedAt) {
-		t.Fatalf("run timing = started %v, deadline %v, want a valid deadline", got.StartedAt, got.DeadlineAt)
+	if got.TestCode != incrementTestCode {
+		t.Fatalf("frozen oracle = %q, want generated test source", got.TestCode)
 	}
-	if got.Oracle != "authored" {
-		t.Fatalf("run oracle = %q, want authored", got.Oracle)
+	if got.CoderModel != "code-model" || got.TesterModel != "test-model" {
+		t.Fatalf("run role models = coder %q tester %q, want selected values", got.CoderModel, got.TesterModel)
 	}
 	if len(got.Attempts) != 2 {
 		t.Fatalf("attempt count = %d, want 2", len(got.Attempts))
 	}
-	if got.Attempts[0].Passed {
-		t.Fatalf("first attempt = %#v, want failure", got.Attempts[0])
-	}
-	if !strings.Contains(got.Attempts[0].Output, "RUN_TEST_FAILURE_MARKER") {
-		t.Fatalf("first attempt output = %q, want verifier failure marker", got.Attempts[0].Output)
+	if got.Attempts[0].Passed || !strings.Contains(got.Attempts[0].Output, "RUN_TEST_FAILURE_MARKER") {
+		t.Fatalf("first attempt = %#v, want verifier failure", got.Attempts[0])
 	}
 	if !got.Attempts[1].Passed || got.Attempts[1].Code != correctCode {
 		t.Fatalf("second attempt = %#v, want passing corrected code", got.Attempts[1])
+	}
+	if got.CurrentAttempt != 2 || got.Stage != PhaseComplete {
+		t.Fatalf("terminal progress = attempt %d stage %q, want 2/complete", got.CurrentAttempt, got.Stage)
+	}
+	if tester.callCount() != 1 {
+		t.Fatalf("tester calls = %d, want 1 frozen oracle", tester.callCount())
 	}
 
 	got.Attempts[0].Code = "mutated snapshot"
@@ -73,44 +77,94 @@ func Increment(value int) int {
 	}
 }
 
-func TestStoreRecordsInfrastructureError(t *testing.T) {
-	providerErr := errors.New("provider unavailable")
-	store, err := NewStore(&scriptedLLM{responses: []scriptedResponse{{err: providerErr}}}, 1, time.Second, time.Minute)
-	if err != nil {
-		t.Fatalf("NewStore() error = %v", err)
-	}
+func TestStoreRetainsAuthoredControlPath(t *testing.T) {
+	correctCode := `package solution
 
-	id, err := store.StartRun(incrementTask())
+func Increment(value int) int {
+	return value + 1
+}
+`
+	store := newStore(t, Config{MaxAttempts: 1, OracleAttempts: 1, TestTimeout: 10 * time.Second, RunTimeout: time.Minute})
+	id, err := store.StartRun(incrementTask(), Roles{Coder: &scriptedLLM{responses: []scriptedResponse{{text: correctCode}}}, CoderModel: "control-model"})
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
 	}
 	got := waitForTerminalRun(t, store, id)
-
-	if got.Status != StatusInfrastructureFailed {
-		t.Fatalf("run status = %q, want %q", got.Status, StatusInfrastructureFailed)
+	if got.Status != StatusPassed {
+		t.Fatalf("authored run status = %q, want passed; error = %q", got.Status, got.Error)
 	}
-	if !strings.Contains(got.Error, providerErr.Error()) {
-		t.Fatalf("run error = %q, want provider error", got.Error)
+	if got.Oracle != string(domain.OracleAuthored) || got.TestCode != incrementTestCode {
+		t.Fatalf("authored snapshot = oracle %q test %q, want fixed authored test", got.Oracle, got.TestCode)
 	}
-	if len(got.Attempts) != 0 {
-		t.Fatalf("attempt count = %d, want 0", len(got.Attempts))
+	if got.TesterModel != "" {
+		t.Fatalf("authored tester model = %q, want empty", got.TesterModel)
 	}
 }
 
-func TestStoreRejectsInvalidInputs(t *testing.T) {
-	if _, err := NewStore(nil, 1, time.Second, time.Second); err == nil {
-		t.Fatal("NewStore(nil, ...) error = nil, want validation error")
+func TestStorePublishesWritingOracleAndCancelsTestWriter(t *testing.T) {
+	tester := newBlockingLLM()
+	store := newStore(t, Config{MaxAttempts: 1, OracleAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute})
+
+	id, err := store.StartRun(generatedIncrementTask(), Roles{Coder: failLLM{}, Tester: tester})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
 	}
-	if _, err := NewStore(&scriptedLLM{}, 1, time.Second, 0); err == nil {
-		t.Fatal("NewStore(..., zero run timeout) error = nil, want validation error")
+	waitForSignal(t, tester.started, "test-writer call")
+	active := waitForStage(t, store, id, PhaseWritingOracle)
+	if active.CurrentAttempt != 0 {
+		t.Fatalf("oracle stage current attempt = %d, want 0", active.CurrentAttempt)
 	}
 
-	store, err := NewStore(&scriptedLLM{}, 1, time.Second, time.Minute)
-	if err != nil {
-		t.Fatalf("NewStore() error = %v", err)
+	found, canceled := store.CancelRun(id)
+	if !found || !canceled {
+		t.Fatalf("CancelRun() = (%t, %t), want (true, true)", found, canceled)
 	}
-	if _, err := store.StartRun(domain.Task{}); err == nil {
-		t.Fatal("StartRun(empty task) error = nil, want validation error")
+	got := waitForTerminalRun(t, store, id)
+	if got.Status != StatusCanceled {
+		t.Fatalf("run status = %q, want canceled; error = %q", got.Status, got.Error)
+	}
+	if len(got.Attempts) != 0 || got.TestCode != "" {
+		t.Fatalf("canceled pre-oracle run = attempts %#v test %q, want no candidate or oracle", got.Attempts, got.TestCode)
+	}
+}
+
+func TestStoreTimesOutWhileWritingOracle(t *testing.T) {
+	tester := newBlockingLLM()
+	store := newStore(t, Config{MaxAttempts: 1, OracleAttempts: 1, TestTimeout: time.Second, RunTimeout: 100 * time.Millisecond})
+	id, err := store.StartRun(generatedIncrementTask(), Roles{Coder: failLLM{}, Tester: tester})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	waitForSignal(t, tester.started, "test-writer call")
+	got := waitForTerminalRun(t, store, id)
+	if got.Status != StatusTimedOut {
+		t.Fatalf("run status = %q, want timedout; error = %q", got.Status, got.Error)
+	}
+	if !strings.Contains(got.Error, "run timed out after") {
+		t.Fatalf("timeout explanation = %q", got.Error)
+	}
+}
+
+func TestStoreClassifiesRejectedGeneratedOracle(t *testing.T) {
+	tester := &scriptedLLM{responses: []scriptedResponse{{text: `package solution
+
+import "testing"
+`}}}
+	coder := &countingFailLLM{}
+	store := newStore(t, Config{MaxAttempts: 1, OracleAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute})
+	id, err := store.StartRun(generatedIncrementTask(), Roles{Coder: coder, Tester: tester})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	got := waitForTerminalRun(t, store, id)
+	if got.Status != StatusOracleFailed {
+		t.Fatalf("run status = %q, want oraclefailed; error = %q", got.Status, got.Error)
+	}
+	if coder.callCount() != 0 {
+		t.Fatalf("coder calls = %d, want 0 after rejected oracle", coder.callCount())
+	}
+	if len(got.Attempts) != 0 || got.TestCode != "" {
+		t.Fatalf("oracle failure snapshot = attempts %#v test %q, want no accepted oracle/candidate", got.Attempts, got.TestCode)
 	}
 }
 
@@ -121,89 +175,55 @@ func Increment(value int) int {
 	return value + 1
 }
 `
-	store, err := NewStore(&scriptedLLM{responses: []scriptedResponse{{text: correctCode}}}, 1, 10*time.Second, time.Minute)
-	if err != nil {
-		t.Fatalf("NewStore() error = %v", err)
-	}
-
-	id, err := store.StartRun(slowIncrementTask())
+	store := newStore(t, Config{MaxAttempts: 1, OracleAttempts: 1, TestTimeout: 10 * time.Second, RunTimeout: time.Minute})
+	id, err := store.StartRun(slowIncrementTask(), Roles{Coder: &scriptedLLM{responses: []scriptedResponse{{text: correctCode}}}})
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
 	}
 	active := waitForStage(t, store, id, PhaseVerifying)
-	if active.Status != StatusRunning {
-		t.Fatalf("active status = %q, want %q", active.Status, StatusRunning)
-	}
 	if active.CurrentAttempt != 1 {
 		t.Fatalf("active attempt = %d, want 1", active.CurrentAttempt)
 	}
-
-	completed := waitForTerminalRun(t, store, id)
-	if completed.Status != StatusPassed {
-		t.Fatalf("completed status = %q, want %q; error = %q", completed.Status, StatusPassed, completed.Error)
+	if got := waitForTerminalRun(t, store, id); got.Status != StatusPassed {
+		t.Fatalf("completed status = %q, want passed; error = %q", got.Status, got.Error)
 	}
 }
 
-func TestStoreCancelsActiveProviderCall(t *testing.T) {
+func TestStoreRejectsSecondLiveRun(t *testing.T) {
 	coder := newBlockingLLM()
-	store, err := NewStore(coder, 1, time.Second, time.Minute)
+	store := newStore(t, Config{MaxAttempts: 1, OracleAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute})
+	id, err := store.StartRun(incrementTask(), Roles{Coder: coder})
 	if err != nil {
-		t.Fatalf("NewStore() error = %v", err)
+		t.Fatalf("first StartRun() error = %v", err)
 	}
+	waitForSignal(t, coder.started, "coder call")
+	if _, err := store.StartRun(incrementTask(), Roles{Coder: failLLM{}}); !errors.Is(err, ErrRunActive) {
+		t.Fatalf("second StartRun() error = %v, want errors.Is(_, ErrRunActive)", err)
+	}
+	store.CancelRun(id)
+	_ = waitForTerminalRun(t, store, id)
+}
 
-	id, err := store.StartRun(incrementTask())
-	if err != nil {
-		t.Fatalf("StartRun() error = %v", err)
+func TestStoreRejectsInvalidInputs(t *testing.T) {
+	if _, err := NewStore(Config{}); err == nil {
+		t.Fatal("NewStore(Config{}) error = nil, want validation error")
 	}
-	waitForSignal(t, coder.started, "provider call")
-	active := waitForStage(t, store, id, PhaseWaitingForProvider)
-	if active.CurrentAttempt != 1 {
-		t.Fatalf("active attempt = %d, want 1", active.CurrentAttempt)
+	store := newStore(t, Config{MaxAttempts: 1, OracleAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute})
+	if _, err := store.StartRun(domain.Task{}, Roles{}); err == nil {
+		t.Fatal("StartRun(empty task) error = nil, want validation error")
 	}
-
-	found, canceled := store.CancelRun(id)
-	if !found || !canceled {
-		t.Fatalf("CancelRun() = (%t, %t), want (true, true)", found, canceled)
-	}
-	got := waitForTerminalRun(t, store, id)
-	if got.Status != StatusCanceled {
-		t.Fatalf("run status = %q, want %q; error = %q", got.Status, StatusCanceled, got.Error)
-	}
-	if got.Stage != PhaseComplete {
-		t.Fatalf("run stage = %q, want %q", got.Stage, PhaseComplete)
-	}
-	if len(got.Attempts) != 0 {
-		t.Fatalf("attempt count = %d, want 0", len(got.Attempts))
-	}
-
-	found, canceled = store.CancelRun(id)
-	if !found || canceled {
-		t.Fatalf("second CancelRun() = (%t, %t), want (true, false)", found, canceled)
+	if _, err := store.StartRun(generatedIncrementTask(), Roles{Coder: failLLM{}}); err == nil {
+		t.Fatal("StartRun(generated without tester) error = nil, want validation error")
 	}
 }
 
-func TestStoreTimesOutActiveProviderCall(t *testing.T) {
-	coder := newBlockingLLM()
-	store, err := NewStore(coder, 1, time.Second, 100*time.Millisecond)
+func newStore(t *testing.T, config Config) *Store {
+	t.Helper()
+	store, err := NewStore(config)
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
-
-	id, err := store.StartRun(incrementTask())
-	if err != nil {
-		t.Fatalf("StartRun() error = %v", err)
-	}
-	waitForSignal(t, coder.started, "provider call")
-	got := waitForTerminalRun(t, store, id)
-	if got.Status != StatusTimedOut {
-		t.Fatalf("run status = %q, want %q; error = %q", got.Status, StatusTimedOut, got.Error)
-	}
-	if !strings.Contains(got.Error, "run timed out after") {
-		t.Fatalf("run error = %q, want timeout explanation", got.Error)
-	}
-	if len(got.Attempts) != 0 {
-		t.Fatalf("attempt count = %d, want 0", len(got.Attempts))
-	}
+	return store
 }
 
 func waitForTerminalRun(t *testing.T, store *Store, id string) Run {
@@ -258,17 +278,27 @@ type scriptedResponse struct {
 }
 
 type scriptedLLM struct {
+	mu        sync.Mutex
 	responses []scriptedResponse
+	calls     int
 }
 
-func (coder *scriptedLLM) Complete(_ context.Context, _ string) (string, error) {
-	if len(coder.responses) == 0 {
+func (model *scriptedLLM) Complete(_ context.Context, _ string) (string, error) {
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	model.calls++
+	if len(model.responses) == 0 {
 		return "", errors.New("unexpected completion request")
 	}
-
-	response := coder.responses[0]
-	coder.responses = coder.responses[1:]
+	response := model.responses[0]
+	model.responses = model.responses[1:]
 	return response.text, response.err
+}
+
+func (model *scriptedLLM) callCount() int {
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	return model.calls
 }
 
 type blockingLLM struct {
@@ -280,20 +310,39 @@ func newBlockingLLM() *blockingLLM {
 	return &blockingLLM{started: make(chan struct{})}
 }
 
-func (coder *blockingLLM) Complete(ctx context.Context, _ string) (string, error) {
-	coder.once.Do(func() {
-		close(coder.started)
+func (model *blockingLLM) Complete(ctx context.Context, _ string) (string, error) {
+	model.once.Do(func() {
+		close(model.started)
 	})
 	<-ctx.Done()
 	return "", ctx.Err()
 }
 
-func incrementTask() domain.Task {
-	return domain.Task{
-		Name:      "increment",
-		Spec:      "Return the input integer increased by one.",
-		Signature: "func Increment(value int) int",
-		TestCode: `package solution
+type failLLM struct{}
+
+func (failLLM) Complete(_ context.Context, _ string) (string, error) {
+	return "", errors.New("unexpected completion request")
+}
+
+type countingFailLLM struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (model *countingFailLLM) Complete(_ context.Context, _ string) (string, error) {
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	model.calls++
+	return "", errors.New("coder should not have been called")
+}
+
+func (model *countingFailLLM) callCount() int {
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	return model.calls
+}
+
+const incrementTestCode = `package solution
 
 import "testing"
 
@@ -302,8 +351,23 @@ func TestIncrement(t *testing.T) {
 		t.Fatalf("RUN_TEST_FAILURE_MARKER: Increment(2) = %d, want 3", got)
 	}
 }
-`,
+`
+
+func incrementTask() domain.Task {
+	return domain.Task{
+		Name:      "increment",
+		Spec:      "Return the input integer increased by one.",
+		Signature: "func Increment(value int) int",
+		Oracle:    domain.OracleAuthored,
+		TestCode:  incrementTestCode,
 	}
+}
+
+func generatedIncrementTask() domain.Task {
+	task := incrementTask()
+	task.Oracle = domain.OracleGenerated
+	task.TestCode = ""
+	return task
 }
 
 func slowIncrementTask() domain.Task {

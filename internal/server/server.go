@@ -4,40 +4,125 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"codex-hackathon-july2026/internal/domain"
+	"codex-hackathon-july2026/internal/llm"
 	"codex-hackathon-july2026/internal/run"
 )
 
-// New returns the browser handler for one configured task and its run store.
-func New(store *run.Store, task domain.Task) (http.Handler, error) {
-	if store == nil {
+const (
+	maxRunRequestBytes = 32 << 10
+	maxTaskNameBytes   = 120
+	maxSpecBytes       = 24 << 10
+	maxSignatureBytes  = 2 << 10
+	maxRequestIDBytes  = 128
+)
+
+// ModelDefaults supplies the selected browser defaults. Both values must belong to Models.
+type ModelDefaults struct {
+	CoderModel  string `json:"coderModel"`
+	TesterModel string `json:"testerModel"`
+}
+
+// Preset is an editable browser starting point. It intentionally has no oracle source: every
+// interactive task starts in generated-oracle mode and remains structurally blind.
+type Preset struct {
+	Name      string `json:"name"`
+	Spec      string `json:"spec"`
+	Signature string `json:"signature"`
+}
+
+// Config wires the HTTP layer to an in-memory store and a safe, provider-configured model
+// allowlist. It contains no provider credentials in any API response.
+type Config struct {
+	Store    *run.Store
+	Models   *llm.ModelCatalog
+	Defaults ModelDefaults
+	Presets  []Preset
+}
+
+// New returns the browser handler for interactive generated-oracle runs.
+func New(config Config) (http.Handler, error) {
+	if config.Store == nil {
 		return nil, errors.New("run store is required")
 	}
+	if config.Models == nil {
+		return nil, errors.New("model catalog is required")
+	}
+	if _, err := config.Models.Resolve(config.Defaults.CoderModel); err != nil {
+		return nil, fmt.Errorf("resolve default coder model: %w", err)
+	}
+	if _, err := config.Models.Resolve(config.Defaults.TesterModel); err != nil {
+		return nil, fmt.Errorf("resolve default test-writer model: %w", err)
+	}
+	for index, preset := range config.Presets {
+		if err := validatePreset(preset); err != nil {
+			return nil, fmt.Errorf("preset %d: %w", index+1, err)
+		}
+	}
 
+	setup := setupResponse{
+		Models:   config.Models.Options(),
+		Defaults: config.Defaults,
+		Presets:  append([]Preset(nil), config.Presets...),
+	}
+	starts := newStartRegistry()
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /task", func(writer http.ResponseWriter, _ *http.Request) {
-		writeJSON(writer, http.StatusOK, taskResponse{
-			Task:      task.Name,
-			Spec:      task.Spec,
-			Signature: task.Signature,
-			Oracle:    "authored",
-			TestCode:  task.TestCode,
-		})
+	mux.HandleFunc("GET /setup", func(writer http.ResponseWriter, _ *http.Request) {
+		writeJSON(writer, http.StatusOK, setup)
 	})
 	mux.HandleFunc("POST /run", func(writer http.ResponseWriter, request *http.Request) {
-		id, err := store.StartRun(task)
+		input, err := decodeRunRequest(writer, request)
 		if err != nil {
-			writeJSON(writer, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+			return
+		}
+
+		coder, err := config.Models.Resolve(input.CoderModel)
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "unknown code-writer model"})
+			return
+		}
+		tester, err := config.Models.Resolve(input.TesterModel)
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "unknown test-writer model"})
+			return
+		}
+
+		id, err := starts.start(input.RequestID, func() (string, error) {
+			return config.Store.StartRun(
+				domain.Task{
+					Name:      input.Name,
+					Spec:      input.Spec,
+					Signature: input.Signature,
+					Oracle:    domain.OracleGenerated,
+				},
+				run.Roles{
+					Coder:       coder,
+					Tester:      tester,
+					CoderModel:  input.CoderModel,
+					TesterModel: input.TesterModel,
+				},
+			)
+		})
+		if err != nil {
+			if errors.Is(err, run.ErrRunActive) {
+				writeJSON(writer, http.StatusConflict, errorResponse{Error: err.Error()})
+				return
+			}
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
 			return
 		}
 		writeJSON(writer, http.StatusAccepted, startResponse{ID: id})
 	})
 	mux.HandleFunc("POST /run/{id}/cancel", func(writer http.ResponseWriter, request *http.Request) {
 		id := strings.TrimSpace(request.PathValue("id"))
-		found, canceled := store.CancelRun(id)
+		found, canceled := config.Store.CancelRun(id)
 		if !found {
 			writeJSON(writer, http.StatusNotFound, errorResponse{Error: "run not found"})
 			return
@@ -50,7 +135,7 @@ func New(store *run.Store, task domain.Task) (http.Handler, error) {
 	})
 	mux.HandleFunc("GET /run/{id}", func(writer http.ResponseWriter, request *http.Request) {
 		id := strings.TrimSpace(request.PathValue("id"))
-		snapshot, found := store.GetRun(id)
+		snapshot, found := config.Store.GetRun(id)
 		if !found {
 			writeJSON(writer, http.StatusNotFound, errorResponse{Error: "run not found"})
 			return
@@ -62,6 +147,12 @@ func New(store *run.Store, task domain.Task) (http.Handler, error) {
 	return mux, nil
 }
 
+type setupResponse struct {
+	Models   []llm.ModelOption `json:"models"`
+	Defaults ModelDefaults     `json:"defaults"`
+	Presets  []Preset          `json:"presets"`
+}
+
 type startResponse struct {
 	ID string `json:"id"`
 }
@@ -70,12 +161,115 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
-type taskResponse struct {
-	Task      string `json:"task"`
-	Spec      string `json:"spec"`
-	Signature string `json:"signature"`
-	Oracle    string `json:"oracle"`
-	TestCode  string `json:"testCode"`
+type runRequest struct {
+	RequestID   string `json:"requestId"`
+	Name        string `json:"name"`
+	Spec        string `json:"spec"`
+	Signature   string `json:"signature"`
+	CoderModel  string `json:"coderModel"`
+	TesterModel string `json:"testerModel"`
+}
+
+func decodeRunRequest(writer http.ResponseWriter, request *http.Request) (runRequest, error) {
+	request.Body = http.MaxBytesReader(writer, request.Body, maxRunRequestBytes)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+
+	var input runRequest
+	if err := decoder.Decode(&input); err != nil {
+		return runRequest{}, fmt.Errorf("invalid run request: %w", err)
+	}
+	if err := ensureSingleJSONValue(decoder); err != nil {
+		return runRequest{}, err
+	}
+	return normalizeRunRequest(input)
+}
+
+func ensureSingleJSONValue(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); err == io.EOF {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("invalid run request: %w", err)
+	}
+	return errors.New("invalid run request: multiple JSON values")
+}
+
+func normalizeRunRequest(input runRequest) (runRequest, error) {
+	input.Name = strings.TrimSpace(input.Name)
+	input.RequestID = strings.TrimSpace(input.RequestID)
+	input.Spec = strings.TrimSpace(input.Spec)
+	input.Signature = strings.TrimSpace(input.Signature)
+	input.CoderModel = strings.TrimSpace(input.CoderModel)
+	input.TesterModel = strings.TrimSpace(input.TesterModel)
+	if input.Name == "" {
+		input.Name = "custom-task"
+	}
+	if err := validateRequestID(input.RequestID); err != nil {
+		return runRequest{}, err
+	}
+	if len(input.Name) > maxTaskNameBytes {
+		return runRequest{}, fmt.Errorf("task name exceeds %d bytes", maxTaskNameBytes)
+	}
+	if input.Spec == "" {
+		return runRequest{}, errors.New("task specification is required")
+	}
+	if len(input.Spec) > maxSpecBytes {
+		return runRequest{}, fmt.Errorf("task specification exceeds %d bytes", maxSpecBytes)
+	}
+	if input.Signature == "" {
+		return runRequest{}, errors.New("Go function signature is required")
+	}
+	if len(input.Signature) > maxSignatureBytes {
+		return runRequest{}, fmt.Errorf("Go function signature exceeds %d bytes", maxSignatureBytes)
+	}
+	if err := validateFunctionSignature(input.Signature); err != nil {
+		return runRequest{}, err
+	}
+	if input.CoderModel == "" {
+		return runRequest{}, errors.New("code-writer model is required")
+	}
+	if input.TesterModel == "" {
+		return runRequest{}, errors.New("test-writer model is required")
+	}
+	return input, nil
+}
+
+func validateRequestID(requestID string) error {
+	if requestID == "" {
+		return nil
+	}
+	if len(requestID) > maxRequestIDBytes {
+		return fmt.Errorf("request ID exceeds %d bytes", maxRequestIDBytes)
+	}
+	for _, character := range requestID {
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			character == '-' || character == '_' {
+			continue
+		}
+		return errors.New("request ID may contain only letters, digits, hyphens, and underscores")
+	}
+	return nil
+}
+
+func validatePreset(preset Preset) error {
+	_, err := normalizeRunRequest(runRequest{
+		Name:        preset.Name,
+		Spec:        preset.Spec,
+		Signature:   preset.Signature,
+		CoderModel:  "preset-validation",
+		TesterModel: "preset-validation",
+	})
+	return err
+}
+
+func validateFunctionSignature(signature string) error {
+	if err := domain.ValidateSignature(signature); err != nil {
+		return fmt.Errorf("Go function signature is invalid: %w", err)
+	}
+	return nil
 }
 
 func serveIndex(writer http.ResponseWriter, request *http.Request) {
@@ -98,4 +292,35 @@ func writeJSON(writer http.ResponseWriter, status int, value any) {
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	writer.WriteHeader(status)
 	_ = json.NewEncoder(writer).Encode(value)
+}
+
+// startRegistry makes browser start requests idempotent for the lifetime of the process. If a
+// local connection loses the accepted response, the browser can safely retry the same token and
+// recover the existing run ID rather than starting another paid provider run.
+type startRegistry struct {
+	mu   sync.Mutex
+	runs map[string]string
+}
+
+func newStartRegistry() *startRegistry {
+	return &startRegistry{runs: make(map[string]string)}
+}
+
+func (registry *startRegistry) start(requestID string, start func() (string, error)) (string, error) {
+	if requestID == "" {
+		return start()
+	}
+
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if id, found := registry.runs[requestID]; found {
+		return id, nil
+	}
+
+	id, err := start()
+	if err != nil {
+		return "", err
+	}
+	registry.runs[requestID] = id
+	return id, nil
 }

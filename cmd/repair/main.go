@@ -1,4 +1,4 @@
-// Command repair runs the authored-oracle terminal repair-loop demo.
+// Command repair runs the authored terminal control or the interactive generated-oracle browser demo.
 package main
 
 import (
@@ -17,24 +17,35 @@ import (
 	"codex-hackathon-july2026/internal/server"
 )
 
+const (
+	envModelCatalog = "LLM_MODELS"
+	envModelCoder   = "LLM_MODEL_CODER"
+	envModelTester  = "LLM_MODEL_TESTER"
+)
+
 func main() {
 	var address string
 	var maxAttempts int
+	var oracleAttempts int
 	var runTimeout time.Duration
 	var serve bool
 	var verifierTimeout time.Duration
 	flag.StringVar(&address, "addr", "127.0.0.1:8080", "address for the browser demo server")
 	flag.IntVar(&maxAttempts, "attempts", 3, "maximum number of coder attempts")
-	flag.DurationVar(&runTimeout, "run-timeout", 90*time.Second, "maximum duration of one browser repair run")
+	flag.IntVar(&oracleAttempts, "oracle-attempts", 2, "maximum generated-oracle attempts before oraclefailed")
+	flag.DurationVar(&runTimeout, "run-timeout", 150*time.Second, "maximum duration of one browser repair run")
 	flag.BoolVar(&serve, "serve", false, "serve the browser demo instead of running once in the terminal")
 	flag.DurationVar(&verifierTimeout, "verifier-timeout", 10*time.Second, "timeout for one candidate verification")
 	flag.Parse()
 	if flag.NArg() != 0 {
-		fmt.Fprintf(os.Stderr, "usage: %s [-serve] [-addr ADDRESS] [-attempts N] [-run-timeout DURATION] [-verifier-timeout DURATION]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "usage: %s [-serve] [-addr ADDRESS] [-attempts N] [-oracle-attempts N] [-run-timeout DURATION] [-verifier-timeout DURATION]\n", os.Args[0])
 		os.Exit(2)
 	}
 	if maxAttempts <= 0 {
 		exitFailure("configuration error", fmt.Errorf("attempts must be greater than zero"))
+	}
+	if oracleAttempts <= 0 {
+		exitFailure("configuration error", fmt.Errorf("oracle attempts must be greater than zero"))
 	}
 	if verifierTimeout <= 0 {
 		exitFailure("configuration error", fmt.Errorf("verifier timeout must be greater than zero"))
@@ -50,22 +61,28 @@ func main() {
 	if err != nil {
 		exitFailure("configuration error", err)
 	}
-	coder, err := llm.NewClient(config)
+	models, err := configuredModels(config)
 	if err != nil {
 		exitFailure("configuration error", err)
 	}
 	if serve {
-		serveBrowser(address, coder, splitCentsTask(), maxAttempts, verifierTimeout, runTimeout)
+		serveBrowser(address, models, maxAttempts, oracleAttempts, verifierTimeout, runTimeout)
 		return
+	}
+	coder, err := models.catalog.Resolve(models.coder)
+	if err != nil {
+		exitFailure("configuration error", err)
 	}
 
 	final, err := repair.Repair(
 		context.Background(),
 		coder,
+		nil,
 		splitCentsTask(),
 		maxAttempts,
 		verifierTimeout,
-		printAttempt,
+		oracleAttempts,
+		repair.ProgressReporter{AttemptFinished: printAttempt},
 	)
 	if err != nil {
 		exitFailure("provider or verifier infrastructure failure", err)
@@ -78,12 +95,25 @@ func main() {
 	fmt.Printf("gave up after %d attempt(s)\n", final.N)
 }
 
-func serveBrowser(address string, coder llm.LLM, task domain.Task, maxAttempts int, verifierTimeout, runTimeout time.Duration) {
-	store, err := run.NewStore(coder, maxAttempts, verifierTimeout, runTimeout)
+func serveBrowser(address string, models modelSettings, maxAttempts, oracleAttempts int, verifierTimeout, runTimeout time.Duration) {
+	store, err := run.NewStore(run.Config{
+		MaxAttempts:    maxAttempts,
+		OracleAttempts: oracleAttempts,
+		TestTimeout:    verifierTimeout,
+		RunTimeout:     runTimeout,
+	})
 	if err != nil {
 		exitFailure("configuration error", err)
 	}
-	handler, err := server.New(store, task)
+	handler, err := server.New(server.Config{
+		Store:  store,
+		Models: models.catalog,
+		Defaults: server.ModelDefaults{
+			CoderModel:  models.coder,
+			TesterModel: models.tester,
+		},
+		Presets: browserPresets(),
+	})
 	if err != nil {
 		exitFailure("server configuration error", err)
 	}
@@ -91,6 +121,97 @@ func serveBrowser(address string, coder llm.LLM, task domain.Task, maxAttempts i
 	fmt.Printf("Repair Loop browser demo: http://%s\n", address)
 	if err := http.ListenAndServe(address, handler); err != nil {
 		exitFailure("browser server failure", err)
+	}
+}
+
+type modelSettings struct {
+	catalog *llm.ModelCatalog
+	coder   string
+	tester  string
+}
+
+func configuredModels(config llm.Config) (modelSettings, error) {
+	coder := configuredModel(envModelCoder, config.Model)
+	tester := configuredModel(envModelTester, config.Model)
+	modelIDs, err := llm.ParseModelIDs(os.Getenv(envModelCatalog))
+	if err != nil {
+		return modelSettings{}, fmt.Errorf("parse %s: %w", envModelCatalog, err)
+	}
+	if len(modelIDs) == 0 {
+		modelIDs = uniqueModels(config.Model, coder, tester)
+	} else if !containsModel(modelIDs, coder) || !containsModel(modelIDs, tester) {
+		return modelSettings{}, fmt.Errorf("%s must include the configured coder and test-writer defaults", envModelCatalog)
+	}
+
+	catalog, err := llm.NewModelCatalog(config, modelIDs)
+	if err != nil {
+		return modelSettings{}, err
+	}
+	return modelSettings{catalog: catalog, coder: coder, tester: tester}, nil
+}
+
+func uniqueModels(modelIDs ...string) []string {
+	unique := make([]string, 0, len(modelIDs))
+	for _, modelID := range modelIDs {
+		if !containsModel(unique, modelID) {
+			unique = append(unique, modelID)
+		}
+	}
+	return unique
+}
+
+func configuredModel(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func containsModel(modelIDs []string, want string) bool {
+	for _, modelID := range modelIDs {
+		if modelID == want {
+			return true
+		}
+	}
+	return false
+}
+
+func browserPresets() []server.Preset {
+	return []server.Preset{
+		{
+			Name: "split-cents",
+			Spec: `Implement SplitCents(total, recipients int) ([]int, error).
+
+Split a non-negative number of cents among a positive number of recipients. Return a slice
+whose length is exactly recipients. Every recipient gets total / recipients cents, and the
+remaining total % recipients cents go one at a time to the earliest recipients (lower index).
+
+For total < 0 or recipients <= 0, return a nil slice and a non-nil error. Do not panic.`,
+			Signature: "func SplitCents(total, recipients int) ([]int, error)",
+		},
+		{
+			Name: "word-wrap",
+			Spec: `Implement WrapWords(text string, width int) ([]string, error).
+
+Treat each maximal run of Unicode whitespace as one separator. Return lines containing words in
+their original order, separated by one ASCII space. Pack as many whole words as fit on each line
+without exceeding width. A word longer than width must occupy a line by itself. Empty or
+whitespace-only text returns an empty slice. Return a non-nil error when width is less than one.
+Do not split words and do not panic.`,
+			Signature: "func WrapWords(text string, width int) ([]string, error)",
+		},
+		{
+			Name: "semver-compare",
+			Spec: `Implement CompareSemver(left, right string) (int, error) for semantic versions.
+
+Accept only MAJOR.MINOR.PATCH with optional prerelease suffix -identifier.identifier. Each core
+component is a non-negative decimal integer with no leading zero unless it is exactly zero.
+Prerelease identifiers are non-empty ASCII letters, digits, or hyphens. Compare core components
+numerically. A release is greater than its prerelease. Compare numeric prerelease identifiers
+numerically; numeric identifiers sort before non-numeric ones; otherwise compare identifiers
+lexicographically by ASCII. Return -1, 0, or 1. Return a non-nil error for invalid input.`,
+			Signature: "func CompareSemver(left, right string) (int, error)",
+		},
 	}
 }
 
@@ -120,7 +241,8 @@ func printAttempt(attempt domain.Attempt) error {
 
 func splitCentsTask() domain.Task {
 	return domain.Task{
-		Name: "split-cents",
+		Name:   "split-cents",
+		Oracle: domain.OracleAuthored,
 		Spec: `Implement SplitCents(total, recipients int) ([]int, error).
 
 Split a non-negative number of cents among a positive number of recipients. Return a slice

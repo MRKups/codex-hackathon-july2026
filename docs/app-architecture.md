@@ -1,277 +1,242 @@
 # Application Architecture
 
-The settled architecture, stack, and patterns for **Repair Loop**. Read this before
-changing anything.
+The settled architecture for **Repair Loop**. Read this before changing the loop, HTTP API, or
+browser flow.
 
-## Overview
+## Purpose and current shape
 
-A small Go program that runs a **specify → generate → verify → repair** loop with a blind
-oracle: a human writes a spec; `authored` mode uses a fixed human oracle, while later
-`generated` mode uses a separate LLM context that sees only spec + signature. The Go toolchain
-runs candidate and oracle together, and the first failed verifier output is fed back so the
-coder tries again until the tests pass or attempts run out. The hackathon goal is a transparent
-end-to-end loop with a browser view that exposes the real evidence rather than a decorative
-dashboard.
+Repair Loop is a small Go program that makes a blind-oracle repair loop visible:
 
-Big constraints, stated up front:
+```text
+user spec + pinned signature
+        ↓
+blind test-writer → preflight → frozen oracle
+        ↓
+code-writer → Go build/test → feedback → later code-writer attempt
+```
 
-- **The Go toolchain is the verifier.** `go build` (the compiler) is checker #1; `go test`
-  is checker #2. No separate assertion framework.
-- **No sandbox.** Generated code runs locally in a throwaway temp module; a context
-  **timeout** handles runaway/infinite-loop code. This is acceptable because we run our own
-  benign code, not untrusted third-party code at scale.
-- **The oracle is written blind to the code**, in one of two modes — `authored` (human) or
-  `generated` (a separate test-writer context reading only spec + signature). Either way it is
-  frozen before attempt 1 and never regenerated mid-run. See AGENTS.md.
-- **When F17 lands, the coder and test-writer can run on separately configured models** so an
-  ambiguous spec is less likely to be misread identically by both.
-- **State is in-memory** in v1. Nothing persists across restarts (SQLite is a stretch).
+The browser is the interactive generated-oracle path. The terminal retains an authored
+SplitCents task as a known-good control. Both use the same verifier and repair loop.
 
-### What a green run means
+The non-negotiable invariants are structural:
 
-This distinction governs how results are reported and must not be blurred:
+1. `prompt.TestPrompt(spec, signature)` has no candidate-code parameter.
+2. `prompt.FirstPrompt` and `prompt.RepairPrompt` have no test-source parameter.
+3. `repair.resolveOracle` completes before the first coder call and freezes one accepted oracle.
+4. The browser cannot submit test source or choose an oracle mode; it submits only task text,
+   signature, and safe model selections. The server constructs `OracleGenerated`.
 
-| Mode | Green means |
+## What a green run means
+
+| Oracle mode | Green means |
 |---|---|
-| `authored` | the code satisfies a human's fixed oracle — evidence of correctness |
-| `generated` | two independent readings of the spec agreed — evidence of *spec convergence*, weaker |
+| `authored` | Candidate code satisfied a fixed human-authored oracle. |
+| `generated` | A candidate—possibly repaired using Go feedback—satisfied an oracle generated blind to every candidate. It is not verified correctness. |
 
-A `generated` run that gives up with the same assertion failing on every attempt can be a useful
-diagnostic: the coder and test-writer may have resolved the spec differently. It is not a proof
-of ambiguity; oracle quality, coder capability, and repair feedback still need inspection.
+Generated mode is useful for an end-to-end demonstration and for later comparison work, but a
+shared model family can still make the same wrong interpretation twice. The UI and docs must not
+overstate a generated green result.
 
-## Implementation Status
+## Constraints
 
-As of 2026-07-18, F1, C3, F2, F3, F4, F7, F8, and F9 are implemented. The repository contains
-the Go module, an OpenAI-compatible `internal/llm` client, and the dependency-free shared types
-in `internal/domain`. The configured-provider smoke test returned non-empty text on 2026-07-18.
+- **Go stdlib first.** No web framework, npm, CDN, or frontend build chain.
+- **Go is the verifier.** The app runs `go build ./...`, then `go test -timeout <limit> ./...`
+  in a disposable module. `go test -c` preflights a generated oracle without running test
+  bodies.
+- **Trusted-local only.** Model-produced Go is executable local code. A timeout bounds work;
+  this project is not a process sandbox.
+- **In-memory state.** Runs disappear when the process exits.
+- **One live browser run.** The store rejects a second start, even if a caller bypasses the UI.
 
-`internal/prompt` provides the pure F2 coder prompt builders and conservative source extraction;
-`TestPrompt` remains F15 work. `internal/repair` provides the F3 authored-oracle verifier and the
-F4 coder-only `Repair` loop. `internal/run` owns asynchronous in-memory snapshots; `internal/server`
-exposes the small polling API and embeds the single-file browser UI. `cmd/repair` runs one
-hardcoded split-cents task in the terminal or serves it through `-serve`, distinguishing pass,
-exhaustion, cancellation, total-run timeout, and provider/verifier failure.
+## Package direction
 
-The two-oracle-mode design (`authored` / `generated`) was adopted on 2026-07-18, after F1/C3
-and before F2. `internal/domain` predates it and still needs the `OracleMode` field added —
-tracked as F15. Phase 0 (F2–F4) is deliberately built `authored`-only; the test-writer arrives
-in Phase 1 so the coder loop is proven against a known-good fixture first.
+```text
+browser (HTTP only) → server → run → repair
+                                      ├→ prompt
+                                      ├→ llm
+                                      └→ domain
+```
 
-## Technology Stack
-
-| Layer | Technology |
-|---|---|
-| Language | Go 1.26 |
-| HTTP router | Go 1.22+ `net/http` routing; `chi` only if a concrete need justifies it |
-| Frontend | one HTML file + vanilla JS, embedded by `internal/server` via `//go:embed` |
-| LLM provider | OpenAI-compatible chat completions endpoint (set by base URL + key + model + timeout) |
-| Model roles (F17) | planned two `llm.LLM` values: coder (`LLM_MODEL_CODER`) and test-writer (`LLM_MODEL_TESTER`), both falling back to `LLM_MODEL` |
-| Verifier | `go build` + `go test` in a temp module |
-| Oracle (F15) | `authored` (human test file) or `generated` (test-writer context, spec + signature only), frozen before attempt 1 |
-| Run state | in-memory `map[string]*Run` + mutex (SQLite via `modernc.org/sqlite` as a stretch) |
-| Concurrency | one goroutine per run; each browser run owns a cancelable deadline context and exposes live state for polling |
-| Isolation | one injected verifier timeout across `go build` and `go test` — no sandbox |
-| Build / deploy | `go build` → single static binary |
-
-## Package Architecture
-
-Each package has one job. `internal/domain` is the bottom leaf: it imports nothing and owns
-shared `Task` and `Attempt` values; F15 adds `OracleMode`. The Go dependency direction is
-`server → run → repair → {prompt, llm, domain}`, with `task → domain` and loaded task data feeding
-`run`. The browser page is an embedded server asset, not a Go package; its only relationship is
-HTTP polling of `server`. `run` may also import `domain` to pass tasks into repair and expose
-attempts. Nothing imports upward; no cycles.
+`cmd/repair` is the composition root. It reads configuration, creates the allowed model catalog,
+sets role defaults, injects presets, and wires `server` to `run`. No lower package imports an
+upper package.
 
 | Package | Responsibility |
 |---|---|
-| `internal/domain` | Dependency-free `Task` and `Attempt` data. In F4, `Task.TestCode` is the fixed authored verifier input and must never enter a coder prompt. F15 adds `OracleMode`. |
-| `internal/llm` | The `LLM` interface + one concrete client for an OpenAI-compatible endpoint. Owns the HTTP call, and reads base URL + API key + model + timeout from env. Per-call timeout + one retry. F4 composes one coder; F15/F17 later compose separate role values. This package stays role-agnostic. |
-| `internal/prompt` | F4 provides `FirstPrompt(spec, signature)`, `RepairPrompt(spec, signature, previousCode, verifierOutput)`, and `ExtractGoCode(raw)`. Pure string work, no I/O and no `domain` import. F15 adds `TestPrompt(spec, signature)` with no candidate-code parameter. |
-| `internal/repair` | F3 verifier + F4 coder-only loop: `Repair`, `generate`, `runTests`, and an optional synchronous attempt reporter. It owns temp-module verification (`go build`, then `go test`) and retry logic; imports `domain`, `llm`, and `prompt`. F15 adds oracle resolution and test-writer use. |
-| `internal/task` | F6 loader for task files. It returns `domain.Task`; it does not own the shared type. A task directory without `solution_test.go` loads as `OracleGenerated`; one with it loads as `OracleAuthored`. |
-| `internal/run` | Orchestration + state. Launches `Repair` in a goroutine under a store-owned deadline, appends attempts to a `Run` as they land, exposes the active stage, and can cancel one live run. In-memory. |
-| `internal/server` | HTTP handlers (start, poll, and cancel a run) plus the embedded `index.html` browser asset. Thin: it injects the fixed demo task but does not contain repair logic. |
+| `internal/domain` | Dependency-free `Task`, `OracleMode`, `Attempt`, and pinned-signature validation. |
+| `internal/llm` | Stateless OpenAI-compatible completion client and role-agnostic model allowlist/catalog. |
+| `internal/prompt` | Pure prompt construction and conservative code-fence extraction. |
+| `internal/repair` | Oracle resolution/preflight, candidate generation, Go verification, and retry loop. |
+| `internal/run` | Bounded asynchronous runs, snapshots, lifecycle phase, cancellation, and one-live-run guard. |
+| `internal/server` | Strict JSON API plus the embedded vanilla-JS page. |
 
-### Provider configuration
+## Provider and model configuration
 
 | Variable | Meaning |
 |---|---|
-| `LLM_BASE_URL` | API base URL (may include `/v1`); the client appends `/chat/completions` |
-| `LLM_API_KEY` | key for that endpoint |
-| `LLM_MODEL` | default model, used for any role without its own override |
-| `LLM_MODEL_CODER` | F17 planned override for the model that writes solutions; falls back to `LLM_MODEL` |
-| `LLM_MODEL_TESTER` | F17 planned override for the model that writes oracles; falls back to `LLM_MODEL` |
-| `LLM_TIMEOUT` | per-call timeout |
+| `LLM_BASE_URL` | OpenAI-compatible API base URL; the client appends `/chat/completions`. |
+| `LLM_API_KEY` | Provider credential. Never sent to the browser. |
+| `LLM_MODEL` | Required fallback model. |
+| `LLM_MODELS` | Optional comma-separated browser allowlist. Empty means `LLM_MODEL` plus any explicit role defaults. |
+| `LLM_MODEL_CODER` | Optional default code-writer model; falls back to `LLM_MODEL`. |
+| `LLM_MODEL_TESTER` | Optional default blind test-writer model; falls back to `LLM_MODEL`. |
+| `LLM_TIMEOUT` | Whole-call timeout for one completion. |
 
-F17 will add the two role-model variables to `.env.example` and use them at the composition root.
-Setting them to *different* values is the decorrelation mitigation described in the design doc;
-using the same model remains a legal baseline.
+`internal/llm.ModelCatalog` is provider-agnostic. It builds one reusable client per configured
+model ID and rejects an empty or unknown selection. It deliberately does not query a provider’s
+model endpoint or hardcode vendor model names. Role separation happens above it in `cmd/repair`.
 
-### Current F1 client behavior
+The model client uses one stateless user-message completion per call. Choosing the same model for
+both roles is legal; choosing different configured IDs can reduce correlated interpretations.
 
-`LLM_BASE_URL` is an API base URL (it may include `/v1`); the client appends
-`/chat/completions`. It applies one timeout to the whole completion operation and makes one
-immediate retry after a request/read error, HTTP 429, or HTTP 5xx. It currently permits
-`http://` for local test/development providers, so non-local providers must use HTTPS.
-Non-success responses are represented by HTTP status only; their bodies are not retained in
-the client error. The retry and transport hardening work is tracked in C2.
-
-## Data Shapes
-
-### Current Phase 0 types (C3/F4)
-
-`Task` and `Attempt` live in `internal/domain`:
+## Data model
 
 ```go
 package domain
 
+type OracleMode string
+
+const (
+    OracleAuthored  OracleMode = "authored"
+    OracleGenerated OracleMode = "generated"
+)
+
 type Task struct {
-	Name      string // identifier
-	Spec      string // natural-language description of desired behaviour
-	Signature string // pins the API so the oracle compiles
-	TestCode  string // fixed human-authored solution_test.go
+    Name      string
+    Spec      string
+    Signature string
+    Oracle    OracleMode
+    TestCode  string // authored input, or generated/frozen before attempt 1
 }
 
 type Attempt struct {
-	N      int    `json:"n"`      // 1-based
-	Code   string `json:"code"`   // generated solution.go
-	Passed bool   `json:"passed"` // whether both verifier stages passed; false covers build/test failure or timeout
-	Output string `json:"output"` // exact failed-command output, or the stable verifier-timeout note
+    N      int    `json:"n"`
+    Code   string `json:"code"`
+    Passed bool   `json:"passed"`
+    Output string `json:"output"`
 }
 ```
 
-F15 adds `OracleMode` and `Task.Oracle`, then resolves a generated `TestCode` before any coder
-call. The current `Run` JSON contract includes fields reserved for those later features and the
-live lifecycle fields needed by the browser:
+The browser snapshot persists the complete observed evidence for the life of the process:
 
 ```go
-package run
-
-import (
-	"time"
-
-	"codex-hackathon-july2026/internal/domain"
-)
-
 type Run struct {
-	ID             string           `json:"id"`
-	Task           string           `json:"task"`
-	Spec           string           `json:"spec"`
-	Signature      string           `json:"signature"`
-	Oracle         string           `json:"oracle"`      // "authored" | "generated"
-	TestCode       string           `json:"testCode"`    // the frozen oracle, for display
-	MaxAttempts    int              `json:"maxAttempts"`
-	Status         Status           `json:"status"`      // running | passed | gaveup | canceled | timedout | infrastructurefailed | oraclefailed
-	Stage          Phase            `json:"stage"`       // starting | waitingforprovider | verifying | canceling | complete
-	CurrentAttempt int              `json:"currentAttempt"`
-	StartedAt      time.Time        `json:"startedAt"`
-	DeadlineAt     time.Time        `json:"deadlineAt"`
-	FailureMode    string           `json:"failureMode"` // "" | "varied" | "persistent"
-	Error          string           `json:"error"`       // terminal infrastructure/oracle/timeout detail
-	Attempts       []domain.Attempt `json:"attempts"`
+    ID, Task, Spec, Signature string
+    Oracle                    string
+    TestCode                  string
+    CoderModel, TesterModel   string
+    MaxAttempts               int
+    Status                    Status
+    Stage                     Phase
+    CurrentAttempt            int
+    StartedAt, DeadlineAt     time.Time
+    FailureMode, Error        string
+    Attempts                  []domain.Attempt
 }
 ```
 
-Current F7 runs set `Oracle` to `"authored"`. `oraclefailed` and `failureMode` are reserved for
-the F15/F16 and F18 extensions respectively. `infrastructurefailed` is used when the provider or
-harness stops the run without a code verdict; `canceled` and `timedout` are separate, explicit
-browser-run outcomes. `Stage` is meaningful only while `Status` is `running`; terminal snapshots
-use `complete`.
+Generated runs begin with empty `TestCode` and `CurrentAttempt == 0`. Once preflight accepts the
+test source, `TestCode` is written once to the snapshot, then candidate attempt 1 may begin.
 
-## The Loop
+## Repair contract
 
-### Current Phase 0 loop (F4)
-
-1. `Repair` validates the explicit coder, attempt cap, verifier timeout, and authored
-   `Task.TestCode` before calling the provider.
-2. `generate` builds a coder prompt from primitive fields only: spec + signature on attempt 1;
-   previous candidate + exact failed verifier output later. It asks for a complete
-   `package solution` source file, never a test file, and has no parameter through which the
-   oracle could reach it.
-3. `runTests` writes `go.mod` + `solution.go` + `solution_test.go` into an `os.MkdirTemp`
-   module, runs `go build ./...`, then runs `go test ./...` under one injected verifier timeout.
-4. Pass → return. Fail → report the completed attempt, feed its output into the next `generate`,
-   or return the final failed attempt when the budget is exhausted.
-
-### F15+ extension (planned)
-
-F15 inserts `resolveOracle` before step 1. It validates the authored oracle or asks a separate
-test-writer for a generated one from spec + signature only, then freezes the accepted result for
-the rest of the run. F18 later adds optional `varied` / `persistent` classification.
-
-### Oracle preflight and fault attribution
-
-A generated oracle may not compile, and that must never be charged to the coder. `go build`
-ignores `*_test.go`, so F16 preflights the generated `solution_test.go` with `go test -c` against
-a signature-derived stub before the first coder call. That compiles the test without running it.
-A preflight failure is an oracle fault; regenerate candidates up to an injected cap, then end the
-run `oraclefailed` if no candidate is accepted. Use `go/parser` if needed to derive the stub
-safely from the pinned signature; the stub is built, never executed.
-
-### Failure mode classification
-
-On `gaveup`, intersect the set of failing test names across all attempts. A non-empty
-intersection where the coder's approach visibly changed is `persistent` — a diagnostic signal
-that the two readers may have landed on different meanings. Otherwise `varied` — ordinary
-difficulty. This is an optional comparison aid after the core dual-mode flow works, not a
-prerequisite for the hackathon demo.
-
-## HTTP Contract
-
-```
-GET  /task      → 200 fixed authored task context
-POST /run       → 202 { "id": "run_abc" } // starts the injected fixed demo task immediately
-POST /run/{id}/cancel → 202 { "id": "run_abc" } // requests cancellation of a live run
-GET  /run/{id}  → 200 Run                  // poll ~2x/sec; stop when Status != "running"
+```go
+func Repair(
+    ctx context.Context,
+    coder, tester llm.LLM,
+    task domain.Task,
+    maxAttempts int,
+    testTimeout time.Duration,
+    maxOracleAttempts int,
+    report repair.ProgressReporter,
+) (domain.Attempt, error)
 ```
 
-Unknown IDs return 404 JSON; cancel requests after a terminal outcome return 409. API responses
-are `Cache-Control: no-store`. The shipped page is comparison-first: it displays the frozen
-authored oracle above the exact candidate source and raw verifier feedback, then compares a
-rejected candidate with a later candidate when available. While the run is live, it renders the
-actual provider-wait, verification, or cancellation stage with elapsed time against the
-server-owned deadline. It renders untrusted source/output with DOM text nodes, never HTML.
+`ProgressReporter` can receive the one accepted oracle and each completed verification. It lets
+the run store show frozen tests before any candidate lands.
 
-## Persistence
+For an authored task, `tester` may be nil and `Task.TestCode` is validated then frozen. For a
+generated task:
 
-**None in v1** — runs live in memory and are lost on restart. This is fine for a live demo.
-SQLite (`modernc.org/sqlite`, zero-CGO) is a stretch item if runs need to survive restarts.
+1. Parse the user’s one top-level function signature into a panic-only stub.
+2. Ask `tester` with only `TestPrompt(spec, signature)`.
+3. Extract only an unambiguous whole-response code fence; otherwise keep the raw model text.
+4. Reject empty/malformed/obviously bypassed test candidates and preflight valid-looking ones
+   with `go test -c` against the stub. The structural gate requires a direct call to the pinned
+   function and a standard testing failure method, but does not prove oracle quality.
+5. Retry rejected oracle candidates only up to `maxOracleAttempts`, before any coder call.
+6. Return `*repair.OracleFailureError` if none is accepted. The run maps this to `oraclefailed`.
+   A preflight process timeout is infrastructure failure instead of an oracle verdict.
 
-## Error Handling
+After an oracle is frozen, normal candidate attempts use only `FirstPrompt` or `RepairPrompt`.
+Build/test non-zero exits are failed attempts. Provider errors, caller cancellation, temp-file
+failures, process launch failures, and reporter errors are ordinary errors. An exhausted candidate
+budget returns the final failed attempt with nil error.
 
-In F4, `Repair` validates a non-nil coder, a positive attempt cap and verifier timeout, and a
-non-empty authored oracle before calling the provider. Then it follows this contract:
+## Run lifecycle
 
-- Any text returned by `LLM.Complete` with a nil error is candidate source, even when it is
-  empty, unfenced, or invalid Go. Extraction is conservative and never repairs it; the verifier
-  decides whether it works.
-- Provider transport, status, and protocol errors—including the concrete client's rejected empty
-  or malformed response—are infrastructure errors and stop the loop.
-- A non-zero `go build` or `go test` exit creates a failed attempt with the verbatim combined
-  output from the command that failed. A build failure skips `go test`. A successful attempt has
-  empty feedback.
-- If the derived verifier timeout expires while the caller context remains live, return a failed
-  attempt with one stable timeout note and no infrastructure error. If the caller context is
-  cancelled or reaches its deadline, return `ctx.Err()` instead.
-- Temp-directory, file-write, cleanup, and command-launch failures are infrastructure errors;
-  cleanup errors must not be silently discarded. A synchronous attempt-reporter error is a caller
-  error and stops the loop after the attempt it received. An exhausted positive attempt budget
-  returns the final failed attempt with a nil error.
-- Oracle resolution failures are an F15+ class. A missing authored `TestCode` is a caller error.
-  In generated mode, an empty extraction or a test file that fails preflight is retried up to the
-  oracle cap; exhausting it returns an `oraclefailed` error before any coder call is made. An
-  oracle fault is never reported as a failed attempt.
+Each browser run owns a `context.WithDeadline(context.Background(), deadline)` and a private
+cancel function. It reports these live phases:
 
-For the browser path, `run.Store` provides that caller context. `-run-timeout` defaults to 90
-seconds and is a cap on the whole generate → verify → repair run, independent of `LLM_TIMEOUT`
-for one completion and `-verifier-timeout` for one Go verification. A user cancellation produces
-`canceled`; expiry of the outer cap produces `timedout`; a provider's own timeout remains
-`infrastructurefailed`.
+| Phase | Meaning |
+|---|---|
+| `starting` | Snapshot created. |
+| `writingoracle` | Test-writer completion is in flight; candidate attempt is `0`. |
+| `preflightingoracle` | Generated test source is being checked before code exists. |
+| `waitingforprovider` | Code-writer completion is in flight. |
+| `verifying` | Go is building/testing the current candidate. |
+| `canceling` | User cancellation was accepted. |
+| `complete` | Terminal state. |
+
+Terminal statuses are `passed`, `gaveup`, `canceled`, `timedout`, `oraclefailed`, and
+`infrastructurefailed`. Cancellation and the whole-run deadline take precedence over a pending
+provider/verifier result and are never recast as candidate failures.
+
+## HTTP contract
+
+```text
+GET  /setup                 → configured model IDs, role defaults, editable presets
+POST /run                   → accepts task input, returns 202 {"id":"run_..."}
+POST /run/{id}/cancel       → requests cancellation of a live run
+GET  /run/{id}              → live Run snapshot
+GET  /                      → embedded browser page
+```
+
+The request body for `POST /run` is exactly:
+
+```json
+{
+  "requestId": "browser-generated-idempotency-token",
+  "name": "optional label",
+  "spec": "required behaviour",
+  "signature": "func Solve(input string) (string, error)",
+  "coderModel": "configured-id",
+  "testerModel": "configured-id"
+}
+```
+
+The browser creates `requestId`; retrying it returns the same run ID and cannot start a second
+run. The server uses `DisallowUnknownFields`, caps body/field size, validates one type-valid
+bodyless function signature, and rejects model IDs outside the catalog. `testCode` and an
+oracle-mode override are therefore impossible request fields. HTTP responses are
+`Cache-Control: no-store`; terminal cancel or concurrent-start conflicts return `409`.
+
+## Browser behavior
+
+The page is a single embedded `index.html`. It uses `textContent`/DOM nodes for all provider and
+verifier data, never HTML insertion. A compact form sits above the existing comparison layout:
+
+- Preset buttons populate editable task inputs without starting a run.
+- The active run locks the form and exposes its role models.
+- The oracle panel moves from pending to frozen source before code appears.
+- Candidate / raw feedback / later candidate remain side by side, with selectors for attempts.
+- Polling is bound to a run ID plus generation, so late responses cannot overwrite another run.
+- The page retains polling after ambiguous transport failure and offers cancellation.
+- Downloaded JSON is the final accepted-evidence snapshot; rejected oracle candidates and raw
+  provider wrapper replies are not retained, and there is no disk persistence yet.
 
 ## Deployment
 
-- **Target**: run the binary anywhere with the Go toolchain available (the loop shells out to
-  `go build` and `go test`, so `go` must be on PATH on the host).
-- **Build output**: a single static binary via `go build -o repair ./cmd/repair`. The UI is
-  embedded, so there is no separate frontend to deploy.
+Build a single binary with `go build -o repair ./cmd/repair`. The target host needs Go on `PATH`
+at runtime because verification shells out to `go build`, `go test`, and generated-oracle
+preflight `go test -c`. The embedded UI has no separate deployment step.
