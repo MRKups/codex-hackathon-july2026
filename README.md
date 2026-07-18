@@ -10,7 +10,7 @@ There is no npm build step or sandbox.
 
 > Working name — rename freely.
 
-## Current status — Phase 0 / F1
+## Current status — Phase 0 / F1 complete
 
 The repository currently contains only the module scaffold and the LLM boundary:
 
@@ -18,9 +18,10 @@ The repository currently contains only the module scaffold and the LLM boundary:
 - `internal/llm` provides `LLM`, an OpenAI-compatible chat-completions client, environment
   configuration, a whole-call timeout, and one immediate retry for its current retryable failures.
 - Local verification is green: build, unit, race, coverage, and vet checks pass. Coverage is
-  73.3% for the current LLM package.
-- F1 remains in progress until one configured provider returns text. No prompt package, task,
-  repair loop, CLI, HTTP server, or UI exists yet.
+  75.0% for the current LLM package.
+- F1 is complete: the configured-provider smoke test returned non-empty text on 2026-07-18.
+  C3 (the shared data/error contract) is the next prerequisite before F2. No prompt package,
+  task, repair loop, CLI, HTTP server, or UI exists yet.
 
 See `docs/tracker.md` for the authoritative current position and next gate.
 
@@ -59,6 +60,22 @@ Use HTTPS for every non-local provider endpoint. The current client permits `htt
 local test servers and local development providers work; do not send a real key to a
 non-local plaintext endpoint.
 
+For local setup, copy the tracked template and keep the populated file private:
+
+```bash
+[ -f .env ] || cp .env.example .env  # already created for the current workspace
+# edit .env with your provider values
+source .env
+```
+
+The live-provider smoke test is deliberately opt-in and sends one short harmless prompt. It
+requires HTTPS, logs no provider response or secret, and may make up to two provider requests
+because F1 retries one eligible failure. It is excluded from ordinary test runs:
+
+```bash
+LLM_LIVE_TEST=run go test -tags=integration ./internal/llm -run '^TestLiveCompletion$' -count=1 -v
+```
+
 ## Current validation
 
 ```bash
@@ -67,10 +84,11 @@ go test ./...
 go test -race ./...
 go test -cover ./...
 go vet ./...
-gofmt -l internal/llm/llm.go internal/llm/client.go internal/llm/client_test.go
+gofmt -l internal/llm/*.go
 ```
 
-A real completion is intentionally not run until the four `LLM_*` variables are configured.
+A real completion is intentionally not run until the four `LLM_*` variables are configured
+and the explicit `integration` build tag plus `LLM_LIVE_TEST=run` opt-in are supplied.
 
 ## Planned CLI and server commands
 

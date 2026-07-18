@@ -25,10 +25,11 @@ Big constraints, stated up front:
 As of 2026-07-18, only F1 is implemented. The repository contains the Go module and
 `internal/llm`: the `LLM` interface, an OpenAI-compatible client, environment-backed
 configuration, and local tests. The client is locally verified with build, unit, race,
-coverage, and vet checks; live-provider verification awaits configured `LLM_*` values.
+coverage, and vet checks; its configured-provider smoke test returned non-empty text on
+2026-07-18.
 
 `prompt`, `repair`, `task`, `run`, `server`, `web`, and `cmd/repair` do not exist yet.
-F1 must make one real completion before F2 begins.
+C3 must resolve the shared data and error contracts before F2 begins.
 
 ## Technology Stack
 
@@ -65,7 +66,8 @@ with `task` feeding `run`. Nothing imports upward; no cycles.
 `/chat/completions`. It applies one timeout to the whole completion operation and makes one
 immediate retry after a request/read error, HTTP 429, or HTTP 5xx. It currently permits
 `http://` for local test/development providers, so non-local providers must use HTTPS.
-The retry and transport hardening work is tracked in C2.
+Non-success responses are represented by HTTP status only; their bodies are not retained in
+the client error. The retry and transport hardening work is tracked in C2.
 
 ## Data Shapes
 

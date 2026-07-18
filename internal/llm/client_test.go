@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -143,6 +144,39 @@ func TestClientCompleteRetriesOnceAfterTransientFailure(t *testing.T) {
 	}
 	if got := calls.Load(); got != 2 {
 		t.Errorf("requests = %d, want 2", got)
+	}
+}
+
+func TestClientCompleteReturnsHTTPStatusWithoutProviderBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		http.Error(response, "provider detail that must not escape the client", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		Model:   "test-model",
+		Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	_, err = client.Complete(context.Background(), "reject me")
+	if err == nil {
+		t.Fatal("Complete() error = nil, want HTTP status error")
+	}
+
+	var statusError *httpStatusError
+	if !errors.As(err, &statusError) {
+		t.Fatalf("Complete() error = %T, want *httpStatusError", err)
+	}
+	if statusError.statusCode != http.StatusUnauthorized {
+		t.Errorf("HTTP status = %d, want %d", statusError.statusCode, http.StatusUnauthorized)
+	}
+	if strings.Contains(err.Error(), "provider detail") {
+		t.Errorf("Complete() error leaked provider response body: %q", err)
 	}
 }
 

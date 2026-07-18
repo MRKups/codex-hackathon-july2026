@@ -187,21 +187,17 @@ func (client *Client) completeOnce(ctx context.Context, prompt string) (string, 
 	}
 	defer response.Body.Close()
 
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		retry := response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= http.StatusInternalServerError
+		return "", retry, &httpStatusError{statusCode: response.StatusCode}
+	}
+
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil {
 		return "", ctx.Err() == nil, fmt.Errorf("read completion response: %w", err)
 	}
 	if len(responseBody) > maxResponseBytes {
 		return "", false, fmt.Errorf("completion response exceeds %d bytes", maxResponseBytes)
-	}
-
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		message := strings.TrimSpace(string(responseBody))
-		if message == "" {
-			message = response.Status
-		}
-		retry := response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= http.StatusInternalServerError
-		return "", retry, fmt.Errorf("completion request returned HTTP %d: %s", response.StatusCode, message)
 	}
 
 	var completion completionResponse
@@ -218,6 +214,14 @@ func (client *Client) completeOnce(ctx context.Context, prompt string) (string, 
 	}
 
 	return content, false, nil
+}
+
+type httpStatusError struct {
+	statusCode int
+}
+
+func (err *httpStatusError) Error() string {
+	return fmt.Sprintf("completion request returned HTTP %d", err.statusCode)
 }
 
 type completionRequest struct {

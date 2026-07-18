@@ -10,15 +10,22 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
 
 ### Phase 0 — Core loop, terminal (critical path)
 
-- [~] **F1 — LLM client.** `internal/llm`: the `LLM` interface + one concrete client for an
+- [x] **F1 — LLM client.** `internal/llm`: the `LLM` interface + one concrete client for an
   OpenAI-compatible endpoint (`Complete(ctx, prompt) (string, error)`). Base URL, key, model,
   and timeout from env. Per-call timeout + one retry. Verify in isolation — a single completion
   returning text — before wiring anything else.
-  Local verification (2026-07-18): `go build ./...`, `go test ./...`, `go test -race ./...`,
-  `go test -cover ./...` (73.3%), `go vet ./...`, and `gofmt` passed. Tests include a
-  standard-library `httptest` completion, retry, and timeout coverage.
-  Live verification remains: configure `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, and
-  `LLM_TIMEOUT`, then make one real completion before starting F2.
+  Local verification (2026-07-18; rerun after adding the live test): `go build ./...`,
+  `go test ./...`, `go test -race ./...`, `go test -cover ./...` (75.0%), `go vet ./...`,
+  and `gofmt` passed. Tests include a standard-library `httptest` completion, retry, and
+  timeout coverage. Non-success provider responses expose their HTTP status without retaining
+  their body.
+  The tracked `.env.example` and ignored local `.env` provide the four variables. The
+  configured-provider smoke test is opt-in: `LLM_LIVE_TEST=run go test -tags=integration
+  ./internal/llm -run '^TestLiveCompletion$' -count=1 -v`. It requires HTTPS, is excluded
+  from ordinary test runs, and must pass before F1 is marked done.
+  Live verification passed on 2026-07-18: the opt-in HTTPS probe returned non-empty text.
+  An initial HTTP 401 was traced to and resolved by correcting the local API key; no secret is
+  tracked. C3 is now the prerequisite before F2.
 
 - [ ] **F2 — Prompt + extraction.** `internal/prompt` (pure, no I/O): `firstPrompt(task)`,
   `repairPrompt(task, prev)`, `extractGoCode(raw)`. First prompt = spec + signature +
