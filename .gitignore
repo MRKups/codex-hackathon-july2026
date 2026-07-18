@@ -23,3 +23,26 @@ go.work.sum
 
 # env file
 .env
+.env.*
+!.env.example
+
+# OS-generated files
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+Thumbs.db
+Desktop.ini
+
+# Editor and IDE state
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local build, test, coverage, and scratch output
+/repair
+/tmp/
+/coverage.out
+/coverage.html
