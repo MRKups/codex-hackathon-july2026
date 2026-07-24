@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"codex-hackathon-july2026/internal/domain"
+	"codex-hackathon-july2026/internal/llm"
 	"codex-hackathon-july2026/internal/verification"
 )
 
@@ -83,7 +84,7 @@ func TestResolverGeneratesBlindBundleWithRulebookEvidence(t *testing.T) {
 	resolver := newResolver(t, 1, DefaultRulebook())
 
 	var events []string
-	resolution, err := resolver.Resolve(context.Background(), Request{Task: task, Author: author}, ProgressReporter{
+	resolution, err := resolver.Resolve(context.Background(), generatedRequest(task, author), ProgressReporter{
 		WritingSource:      func() { events = append(events, "writing") },
 		PreflightingSource: func() { events = append(events, "preflighting") },
 	})
@@ -130,7 +131,7 @@ func TestIncrement(t *testing.T) {
 	author := &scriptedAuthor{responses: []authorResponse{{text: rejectedSource}, {text: acceptedSource}}}
 	resolver := newResolver(t, 2, DefaultRulebook())
 	var events []string
-	resolution, err := resolver.Resolve(context.Background(), Request{Task: task, Author: author}, ProgressReporter{
+	resolution, err := resolver.Resolve(context.Background(), generatedRequest(task, author), ProgressReporter{
 		WritingSource:      func() { events = append(events, "writing") },
 		PreflightingSource: func() { events = append(events, "preflighting") },
 	})
@@ -148,6 +149,114 @@ func TestIncrement(t *testing.T) {
 	}
 }
 
+func TestResolverReviewsAndRevisesOneStructurallyAdmittedOracle(t *testing.T) {
+	task := generatedTask()
+	original := incrementOracleSource()
+	revised := strings.Replace(original, "func TestIncrement", "// revised after review\nfunc TestIncrement", 1)
+	author := &scriptedAuthor{responses: []authorResponse{{text: original}, {text: revised}}}
+	reviewer := &scriptedAuthor{responses: []authorResponse{{text: `{"verdict":"revise","findings":[{"category":"boundary_error_coverage","summary":"Add a clear invalid-input case if the specification requires one."}]}`}}}
+
+	var events []string
+	resolution, err := newResolver(t, 1, DefaultRulebook()).Resolve(context.Background(), generatedRequestWithReviewer(task, author, reviewer), ProgressReporter{
+		WritingSource:      func() { events = append(events, "writing") },
+		PreflightingSource: func() { events = append(events, "preflighting") },
+		ReviewingSource:    func() { events = append(events, "reviewing") },
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolution.Bundle.TestCode != revised {
+		t.Fatalf("frozen source = %q, want revised source %q", resolution.Bundle.TestCode, revised)
+	}
+	evidence := resolution.Evidence
+	if evidence.AuthorAttempts != 2 || evidence.ReviewerAttempts != 1 || evidence.AuthorModel != "author-model" || evidence.ReviewerModel != "reviewer-model" || evidence.ReviewVerdict != ReviewVerdictRevised || len(evidence.ReviewFindings) != 1 {
+		t.Fatalf("review evidence = %#v, want one reviewer and one bounded revision", evidence)
+	}
+	if strings.Join(events, ",") != "writing,preflighting,reviewing,writing,preflighting" {
+		t.Fatalf("progress events = %v", events)
+	}
+	if len(reviewer.prompts) != 1 || !strings.Contains(reviewer.prompts[0], original) {
+		t.Fatalf("reviewer prompts = %#v, want the admitted source", reviewer.prompts)
+	}
+	if len(author.prompts) != 2 || strings.Contains(author.prompts[0], original) || !strings.Contains(author.prompts[1], original) || !strings.Contains(author.prompts[1], "boundary_error_coverage") {
+		t.Fatalf("author prompts = %#v, want blind initial prompt then source/finding-only revision prompt", author.prompts)
+	}
+	for _, promptText := range append(append([]string{}, author.prompts...), reviewer.prompts...) {
+		if strings.Contains(promptText, "CANDIDATE_SOURCE_SENTINEL") {
+			t.Fatalf("oracle prompt leaked candidate source sentinel:\n%s", promptText)
+		}
+	}
+}
+
+func TestResolverRejectsInvalidOrRejectedReviewBeforeCandidateGeneration(t *testing.T) {
+	task := generatedTask()
+
+	tests := []struct {
+		name        string
+		review      string
+		wantVerdict ReviewVerdict
+	}{
+		{
+			name:   "invalid data",
+			review: `{"verdict":"accept","findings":[{"category":"boundary_error_coverage","summary":"contradictory"}]}`,
+		},
+		{
+			name:        "rejected source",
+			review:      `{"verdict":"reject","findings":[{"category":"unsupported_semantic_claim","summary":"The proposed tests assert an unsupported exactness rule."}]}`,
+			wantVerdict: ReviewVerdictRejected,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			author := &scriptedAuthor{responses: []authorResponse{{text: incrementOracleSource()}}}
+			reviewer := &scriptedAuthor{responses: []authorResponse{{text: tt.review}}}
+			resolution, err := newResolver(t, 1, DefaultRulebook()).Resolve(context.Background(), generatedRequestWithReviewer(task, author, reviewer), ProgressReporter{})
+			if resolution.Bundle != (domain.VerificationBundle{}) || !resolution.Evidence.IsZero() {
+				t.Fatalf("failed review returned resolution %#v, want no bundle", resolution)
+			}
+			var failure *OracleFailureError
+			if !errors.As(err, &failure) || failure.Evidence.AuthorAttempts != 1 || failure.Evidence.ReviewerAttempts != 1 {
+				t.Fatalf("Resolve() error = %v, want typed reviewed oracle failure", err)
+			}
+			if failure.Evidence.ReviewVerdict != tt.wantVerdict {
+				t.Fatalf("failure evidence verdict = %q, want %q", failure.Evidence.ReviewVerdict, tt.wantVerdict)
+			}
+			if len(author.prompts) != 1 || len(reviewer.prompts) != 1 {
+				t.Fatalf("oracle calls = author %d reviewer %d, want one each", len(author.prompts), len(reviewer.prompts))
+			}
+		})
+	}
+}
+
+func TestResolverPropagatesReviewerCancellation(t *testing.T) {
+	task := generatedTask()
+	author := &scriptedAuthor{responses: []authorResponse{{text: incrementOracleSource()}}}
+	reviewer := &blockingOracleLLM{started: make(chan struct{})}
+	resolver := newResolver(t, 1, DefaultRulebook())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	finished := make(chan error, 1)
+	go func() {
+		_, err := resolver.Resolve(ctx, generatedRequestWithReviewer(task, author, reviewer), ProgressReporter{})
+		finished <- err
+	}()
+	select {
+	case <-reviewer.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("reviewer did not start")
+	}
+	cancel()
+	select {
+	case err := <-finished:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Resolve() error = %v, want context cancellation", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("resolver did not return after reviewer cancellation")
+	}
+}
 func TestResolverReportsTypedOracleFailureAndNeverUsesStaleSource(t *testing.T) {
 	task := generatedTask()
 	badSource := `package solution
@@ -156,8 +265,8 @@ import "testing"
 `
 	author := &scriptedAuthor{responses: []authorResponse{{text: badSource}, {text: badSource}}}
 	resolver := newResolver(t, 2, DefaultRulebook())
-	resolution, err := resolver.Resolve(context.Background(), Request{Task: task, Author: author}, ProgressReporter{})
-	if resolution != (Resolution{}) {
+	resolution, err := resolver.Resolve(context.Background(), generatedRequest(task, author), ProgressReporter{})
+	if resolution.Bundle != (domain.VerificationBundle{}) || !resolution.Evidence.IsZero() {
 		t.Fatalf("failed resolution = %#v, want zero value", resolution)
 	}
 	var oracleErr *OracleFailureError
@@ -190,7 +299,7 @@ func TestResolverAuthoredSourceNeedsNoAuthorAndHasNoRulebookEvidence(t *testing.
 	if resolution.Bundle.Manifest.Origin != domain.VerificationOriginAuthored || resolution.Bundle.TestCode != task.TestCode {
 		t.Fatalf("authored bundle = %#v", resolution.Bundle)
 	}
-	if resolution.Evidence != (Evidence{}) {
+	if !resolution.Evidence.IsZero() {
 		t.Fatalf("authored evidence = %#v, want no generated-policy evidence", resolution.Evidence)
 	}
 }
@@ -202,15 +311,11 @@ func TestRulebookProvenanceDoesNotChangeExecutableBundleDigest(t *testing.T) {
 	secondRulebook := firstRulebook
 	secondRulebook.Version = "oracle-rulebook/test-v2"
 
-	first, err := newResolver(t, 1, firstRulebook).Resolve(context.Background(), Request{
-		Task: task, Author: &scriptedAuthor{responses: []authorResponse{{text: source}}},
-	}, ProgressReporter{})
+	first, err := newResolver(t, 1, firstRulebook).Resolve(context.Background(), generatedRequest(task, &scriptedAuthor{responses: []authorResponse{{text: source}}}), ProgressReporter{})
 	if err != nil {
 		t.Fatalf("first Resolve() error = %v", err)
 	}
-	second, err := newResolver(t, 1, secondRulebook).Resolve(context.Background(), Request{
-		Task: task, Author: &scriptedAuthor{responses: []authorResponse{{text: source}}},
-	}, ProgressReporter{})
+	second, err := newResolver(t, 1, secondRulebook).Resolve(context.Background(), generatedRequest(task, &scriptedAuthor{responses: []authorResponse{{text: source}}}), ProgressReporter{})
 	if err != nil {
 		t.Fatalf("second Resolve() error = %v", err)
 	}
@@ -242,7 +347,15 @@ func TestValidateResolutionEnforcesBundleProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GeneratedSource() error = %v", err)
 	}
-	generatedEvidence := Evidence{RulebookVersion: "test-rulebook", RulebookDigest: "test-digest", AuthorAttempts: 1}
+	generatedEvidence := Evidence{
+		RulebookVersion:  "test-rulebook",
+		RulebookDigest:   "test-digest",
+		AuthorModel:      "test-author",
+		ReviewerModel:    "test-reviewer",
+		AuthorAttempts:   1,
+		ReviewerAttempts: 1,
+		ReviewVerdict:    ReviewVerdictAccepted,
+	}
 
 	tests := []struct {
 		name       string
@@ -559,6 +672,20 @@ func generatedTask() domain.Task {
 	}
 }
 
+func generatedRequest(task domain.Task, author llm.LLM) Request {
+	return generatedRequestWithReviewer(task, author, &scriptedAuthor{responses: []authorResponse{{text: `{"verdict":"accept","findings":[]}`}}})
+}
+
+func generatedRequestWithReviewer(task domain.Task, author, reviewer llm.LLM) Request {
+	return Request{
+		Task:          task,
+		Author:        author,
+		AuthorModel:   "author-model",
+		Reviewer:      reviewer,
+		ReviewerModel: "reviewer-model",
+	}
+}
+
 func incrementOracleSource() string {
 	return `package solution
 
@@ -590,4 +717,14 @@ func (author *scriptedAuthor) Complete(_ context.Context, promptText string) (st
 	response := author.responses[0]
 	author.responses = author.responses[1:]
 	return response.text, response.err
+}
+
+type blockingOracleLLM struct {
+	started chan struct{}
+}
+
+func (model *blockingOracleLLM) Complete(ctx context.Context, _ string) (string, error) {
+	close(model.started)
+	<-ctx.Done()
+	return "", ctx.Err()
 }

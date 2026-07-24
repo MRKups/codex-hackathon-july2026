@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"codex-hackathon-july2026/internal/domain"
+	"codex-hackathon-july2026/internal/draft"
 	"codex-hackathon-july2026/internal/llm"
 	"codex-hackathon-july2026/internal/oracle"
 	"codex-hackathon-july2026/internal/repair"
@@ -157,6 +158,42 @@ func TestRunAPIRejectsInvalidCustomInput(t *testing.T) {
 				t.Fatalf("POST /run error = %s, want it to contain %q", response.Body.String(), test.wantError)
 			}
 		})
+	}
+}
+
+func TestSignatureDraftAPIValidatesAndHasNoRunSideEffect(t *testing.T) {
+	handler := newHandler(t, providerFor(t, func(model string) string {
+		if model != "test-model" {
+			t.Fatalf("unexpected model %q", model)
+		}
+		return "func Increment(value int) int"
+	}))
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/signature-draft", strings.NewReader(`{"spec":"Return the input plus one.","testerModel":"test-model"}`))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("POST /signature-draft status = %d, want 200; body = %s", response.Code, response.Body.String())
+	}
+	var drafted signatureDraftResponse
+	if err := json.NewDecoder(response.Body).Decode(&drafted); err != nil {
+		t.Fatalf("decode draft response: %v", err)
+	}
+	if drafted.Signature != "func Increment(value int) int" || drafted.Model != "test-model" {
+		t.Fatalf("signature draft = %#v", drafted)
+	}
+
+	for _, body := range []string{
+		`{"testerModel":"test-model"}`,
+		`{"spec":"Return one.","testerModel":"unknown"}`,
+		`{"spec":"Return one.","testerModel":"test-model","signature":"forbidden"}`,
+	} {
+		bad := httptest.NewRecorder()
+		handler.ServeHTTP(bad, httptest.NewRequest(http.MethodPost, "/signature-draft", strings.NewReader(body)))
+		if bad.Code != http.StatusBadRequest {
+			t.Fatalf("POST /signature-draft body %s status = %d, want 400", body, bad.Code)
+		}
 	}
 }
 
@@ -319,8 +356,10 @@ func newHandler(t *testing.T, provider llm.ClientFactory) http.Handler {
 		t.Fatalf("NewStore() error = %v", err)
 	}
 	handler, err := New(Config{
-		Store:  store,
-		Models: catalog,
+		Store:         store,
+		Models:        catalog,
+		Draft:         draft.NewService(),
+		ReviewerModel: "test-model",
 		Defaults: ModelDefaults{
 			CoderModel:  "code-model",
 			TesterModel: "test-model",
@@ -340,9 +379,15 @@ func newHandler(t *testing.T, provider llm.ClientFactory) http.Handler {
 func providerFor(t *testing.T, responseForModel func(string) string) llm.ClientFactory {
 	t.Helper()
 	return llm.ClientFactoryFunc(func(modelID string) (llm.LLM, error) {
-		return providerTestLLM{complete: func(ctx context.Context, _ string) (string, error) {
+		return providerTestLLM{complete: func(ctx context.Context, prompt string) (string, error) {
 			if err := ctx.Err(); err != nil {
 				return "", err
+			}
+			if strings.Contains(prompt, "Review this proposed blind Go test oracle") {
+				return `{"verdict":"accept","findings":[]}`, nil
+			}
+			if strings.Contains(prompt, "Propose one bodyless, top-level Go function signature") {
+				return "func Increment(value int) int", nil
 			}
 			return responseForModel(modelID), nil
 		}}, nil

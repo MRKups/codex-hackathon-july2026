@@ -29,14 +29,17 @@ func Increment(value int) int {
 }
 `
 	tester := &scriptedLLM{responses: []scriptedResponse{{text: incrementTestCode}}}
+	reviewer := &scriptedLLM{responses: []scriptedResponse{{text: `{"verdict":"accept","findings":[]}`}}}
 	coder := &scriptedLLM{responses: []scriptedResponse{{text: wrongCode}, {text: correctCode}}}
 	store := newStore(t, Config{MaxAttempts: 2, TestTimeout: 10 * time.Second, RunTimeout: time.Minute})
 
 	id, err := store.StartRun(generatedIncrementTask(), Roles{
-		Coder:       coder,
-		Tester:      tester,
-		CoderModel:  "code-model",
-		TesterModel: "test-model",
+		Coder:         coder,
+		Tester:        tester,
+		Reviewer:      reviewer,
+		CoderModel:    "code-model",
+		TesterModel:   "test-model",
+		ReviewerModel: "review-model",
 	})
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
@@ -55,7 +58,7 @@ func Increment(value int) int {
 	if got.Verification.Origin != domain.VerificationOriginGenerated || got.Verification.TaskDigest == "" || got.Verification.Digest == "" {
 		t.Fatalf("generated verification manifest = %#v, want generated origin and non-empty digests", got.Verification)
 	}
-	if got.OracleEvidence.RulebookVersion == "" || got.OracleEvidence.RulebookDigest == "" || got.OracleEvidence.AuthorAttempts != 1 {
+	if got.OracleEvidence.RulebookVersion == "" || got.OracleEvidence.RulebookDigest == "" || got.OracleEvidence.AuthorAttempts != 1 || got.OracleEvidence.ReviewerAttempts != 1 || got.OracleEvidence.AuthorModel != "test-model" || got.OracleEvidence.ReviewerModel != "review-model" || got.OracleEvidence.ReviewVerdict != oracle.ReviewVerdictAccepted {
 		t.Fatalf("generated oracle evidence = %#v, want Rulebook provenance and one author attempt", got.OracleEvidence)
 	}
 	if got.CoderModel != "code-model" || got.TesterModel != "test-model" {
@@ -109,7 +112,7 @@ func Increment(value int) int {
 	if got.Verification.Origin != domain.VerificationOriginAuthored || got.Verification.TaskDigest == "" || got.Verification.Digest == "" {
 		t.Fatalf("authored verification manifest = %#v, want authored origin and non-empty digests", got.Verification)
 	}
-	if got.OracleEvidence != (oracle.Evidence{}) {
+	if !got.OracleEvidence.IsZero() {
 		t.Fatalf("authored oracle evidence = %#v, want zero generated-policy evidence", got.OracleEvidence)
 	}
 	if got.TesterModel != "" {
@@ -179,7 +182,7 @@ func TestStoreKeepsCandidateAttemptZeroUntilResolution(t *testing.T) {
 				Bundle:   generatedBundle,
 				Evidence: generatedEvidence(),
 			},
-			roles: Roles{Coder: failLLM{}, Tester: failLLM{}},
+			roles: Roles{Coder: failLLM{}, Tester: failLLM{}, Reviewer: failLLM{}, TesterModel: "test-model", ReviewerModel: "review-model"},
 		},
 	}
 
@@ -233,7 +236,13 @@ func TestIncrement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GeneratedSource() error = %v", err)
 	}
-	resolver := newGatedResolver(oracle.Resolution{Bundle: bundle, Evidence: generatedEvidence()})
+	evidence := generatedEvidence()
+	evidence.ReviewVerdict = oracle.ReviewVerdictRevised
+	evidence.ReviewFindings = []oracle.ReviewFinding{{
+		Category: oracle.FindingBoundaryErrorCoverage,
+		Summary:  "RUN_REVIEW_FINDING_SENTINEL",
+	}}
+	resolver := newGatedResolver(oracle.Resolution{Bundle: bundle, Evidence: evidence})
 	correctCode := `package solution
 
 func Increment(value int) int { return value + 1 }
@@ -243,7 +252,7 @@ func Increment(value int) int { return value + 1 }
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
-	id, err := store.StartRun(task, Roles{Coder: coder, Tester: failLLM{}})
+	id, err := store.StartRun(task, Roles{Coder: coder, Tester: failLLM{}, Reviewer: failLLM{}, TesterModel: "test-model", ReviewerModel: "review-model"})
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
 	}
@@ -260,7 +269,7 @@ func Increment(value int) int { return value + 1 }
 	if len(prompts) != 1 {
 		t.Fatalf("coder prompts = %d, want 1", len(prompts))
 	}
-	for _, forbidden := range []string{oracleSourceSentinel, oracle.DefaultRulebook().PromptText()} {
+	for _, forbidden := range []string{oracleSourceSentinel, oracle.DefaultRulebook().PromptText(), "RUN_REVIEW_FINDING_SENTINEL"} {
 		if strings.Contains(prompts[0], forbidden) {
 			t.Fatalf("candidate prompt leaked oracle material %q:\n%s", forbidden, prompts[0])
 		}
@@ -306,7 +315,7 @@ func TestStoreRejectsInvalidInjectedResolutionBeforeSnapshotOrCandidate(t *testi
 				t.Fatalf("NewStore() error = %v", err)
 			}
 			coder := &countingFailLLM{}
-			id, err := store.StartRun(task, Roles{Coder: coder, Tester: failLLM{}})
+			id, err := store.StartRun(task, Roles{Coder: coder, Tester: failLLM{}, Reviewer: failLLM{}, TesterModel: "test-model", ReviewerModel: "review-model"})
 			if err != nil {
 				t.Fatalf("StartRun() error = %v", err)
 			}
@@ -314,7 +323,7 @@ func TestStoreRejectsInvalidInjectedResolutionBeforeSnapshotOrCandidate(t *testi
 			if got.Status != StatusInfrastructureFailed {
 				t.Fatalf("run status = %q, want infrastructurefailed; error = %q", got.Status, got.Error)
 			}
-			if got.TestCode != "" || got.Verification != (domain.VerificationManifest{}) || got.OracleEvidence != (oracle.Evidence{}) {
+			if got.TestCode != "" || got.Verification != (domain.VerificationManifest{}) || !got.OracleEvidence.IsZero() {
 				t.Fatalf("invalid resolution leaked into snapshot: %#v", got)
 			}
 			if calls, _ := executor.snapshot(); calls != 0 || coder.callCount() != 0 {
@@ -348,7 +357,7 @@ func TestStoreDoesNotPublishLateResolutionAfterTimeout(t *testing.T) {
 	if got.Status != StatusTimedOut {
 		t.Fatalf("run status = %q, want timedout; error = %q", got.Status, got.Error)
 	}
-	if got.TestCode != "" || got.Verification != (domain.VerificationManifest{}) || got.OracleEvidence != (oracle.Evidence{}) {
+	if got.TestCode != "" || got.Verification != (domain.VerificationManifest{}) || !got.OracleEvidence.IsZero() {
 		t.Fatalf("late resolution leaked into timed-out snapshot: %#v", got)
 	}
 	if calls, _ := executor.snapshot(); calls != 0 {
@@ -360,7 +369,7 @@ func TestStorePublishesWritingOracleAndCancelsTestWriter(t *testing.T) {
 	tester := newBlockingLLM()
 	store := newStore(t, Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute})
 
-	id, err := store.StartRun(generatedIncrementTask(), Roles{Coder: failLLM{}, Tester: tester})
+	id, err := store.StartRun(generatedIncrementTask(), Roles{Coder: failLLM{}, Tester: tester, Reviewer: failLLM{}, TesterModel: "test-model", ReviewerModel: "review-model"})
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
 	}
@@ -386,7 +395,7 @@ func TestStorePublishesWritingOracleAndCancelsTestWriter(t *testing.T) {
 func TestStoreTimesOutWhileWritingOracle(t *testing.T) {
 	tester := newBlockingLLM()
 	store := newStore(t, Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: 100 * time.Millisecond})
-	id, err := store.StartRun(generatedIncrementTask(), Roles{Coder: failLLM{}, Tester: tester})
+	id, err := store.StartRun(generatedIncrementTask(), Roles{Coder: failLLM{}, Tester: tester, Reviewer: failLLM{}, TesterModel: "test-model", ReviewerModel: "review-model"})
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
 	}
@@ -407,7 +416,7 @@ import "testing"
 `}}}
 	coder := &countingFailLLM{}
 	store := newStore(t, Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute})
-	id, err := store.StartRun(generatedIncrementTask(), Roles{Coder: coder, Tester: tester})
+	id, err := store.StartRun(generatedIncrementTask(), Roles{Coder: coder, Tester: tester, Reviewer: failLLM{}, TesterModel: "test-model", ReviewerModel: "review-model"})
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
 	}
@@ -749,9 +758,13 @@ func (resolver *lateResolver) Resolve(ctx context.Context, _ oracle.Request, rep
 func generatedEvidence() oracle.Evidence {
 	rulebook := oracle.DefaultRulebook()
 	return oracle.Evidence{
-		RulebookVersion: rulebook.Version,
-		RulebookDigest:  rulebook.Digest(),
-		AuthorAttempts:  1,
+		RulebookVersion:  rulebook.Version,
+		RulebookDigest:   rulebook.Digest(),
+		AuthorModel:      "test-model",
+		ReviewerModel:    "review-model",
+		AuthorAttempts:   1,
+		ReviewerAttempts: 1,
+		ReviewVerdict:    oracle.ReviewVerdictAccepted,
 	}
 }
 

@@ -24,9 +24,13 @@ mechanism and are not a second product name.
 │   │   ├── domain.go             # Task, OracleMode, VerificationBundle values, Attempt
 │   │   ├── signature.go          # Pinned bodyless-function validation
 │   │   └── signature_test.go
+│   ├── draft/
+│   │   ├── draft.go              # Human-confirmed signature proposal boundary
+│   │   └── draft_test.go
 │   ├── oracle/
 │   │   ├── oracle.go             # Blind source resolver, typed progress, generic evidence
 │   │   ├── preflight.go          # Signature stub + structural source admission
+│   │   ├── review.go             # Strict bounded reviewer-result parsing and generic findings
 │   │   ├── rulebook.go           # Checked-in universal non-executable oracle guidance
 │   │   └── oracle_test.go
 │   ├── llm/
@@ -88,7 +92,7 @@ mechanism and are not a second product name.
   the generic completion harness adds no task semantics. The
   authored SplitCents control oracle is a committed Go string in `cmd/repair/main.go`; generated
   source and compiled verification-bundle source exist in the in-memory run snapshot and may be
-  included in downloaded JSON, but are never written back into `tasks/` or another repository
+  included in downloaded JSON, but are never written back into `templates/` or another repository
   task file.
 - **Browser submissions** contain a name, spec, signature, and model IDs. They never contain test
   source, a bundle, or provider credentials. Every browser submission follows the blind generated
@@ -99,8 +103,10 @@ mechanism and are not a second product name.
 ## Planned additions
 
 `internal/oracle/` and the candidate-side `repair.Executor` are explicitly wired at `cmd/repair`,
-not a plugin registry, task-profile directory, or generic workflow framework. F25 may add its
-bounded reviewer/revision pass inside `internal/oracle`. `internal/task` plus `tasks/` remains F6
-work for file-backed authored/generated task loading. SQLite persistence, SSE, attempt diffs, and
-stronger-oracle research are still stretch work. Do not create them as scaffolding before there is
-a concrete tracker item.
+not a plugin registry, task-profile directory, or generic workflow framework. F25's bounded
+reviewer/revision pass lives inside `internal/oracle`. F6 will add `internal/template/` plus a
+project-root `templates/` directory for source-free task-template JSON only; it is not an
+authored-oracle loader and does not store generated test source. F27 will replace the single
+`index.html` with a small set of embedded authoring, launch, and run-analysis documents plus only
+their shared static assets. SQLite persistence, SSE, attempt diffs, and stronger-oracle research
+are still stretch work. Do not create them as scaffolding before there is a concrete tracker item.

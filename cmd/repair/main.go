@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"codex-hackathon-july2026/internal/domain"
+	"codex-hackathon-july2026/internal/draft"
 	"codex-hackathon-july2026/internal/llm"
 	"codex-hackathon-july2026/internal/llm/openai"
 	"codex-hackathon-july2026/internal/oracle"
@@ -20,9 +21,10 @@ import (
 )
 
 const (
-	envModelCatalog = "LLM_MODELS"
-	envModelCoder   = "LLM_MODEL_CODER"
-	envModelTester  = "LLM_MODEL_TESTER"
+	envModelCatalog  = "LLM_MODELS"
+	envModelCoder    = "LLM_MODEL_CODER"
+	envModelTester   = "LLM_MODEL_TESTER"
+	envModelReviewer = "LLM_MODEL_REVIEWER"
 )
 
 func main() {
@@ -133,11 +135,13 @@ func serveBrowser(address string, models modelSettings, resolver oracle.Resolver
 	handler, err := server.New(server.Config{
 		Store:  store,
 		Models: models.catalog,
+		Draft:  draft.NewService(),
 		Defaults: server.ModelDefaults{
 			CoderModel:  models.coder,
 			TesterModel: models.tester,
 		},
-		Presets: browserPresets(),
+		ReviewerModel: models.reviewer,
+		Presets:       browserPresets(),
 	})
 	if err != nil {
 		exitFailure("server configuration error", err)
@@ -150,9 +154,10 @@ func serveBrowser(address string, models modelSettings, resolver oracle.Resolver
 }
 
 type modelSettings struct {
-	catalog *llm.ModelCatalog
-	coder   string
-	tester  string
+	catalog  *llm.ModelCatalog
+	coder    string
+	tester   string
+	reviewer string
 }
 
 func configuredClientFactory(config llm.Config) (llm.ClientFactory, error) {
@@ -175,21 +180,22 @@ func configuredClientFactory(config llm.Config) (llm.ClientFactory, error) {
 func configuredModels(config llm.Config, factory llm.ClientFactory) (modelSettings, error) {
 	coder := configuredModel(envModelCoder, config.Model)
 	tester := configuredModel(envModelTester, config.Model)
+	reviewer := configuredModel(envModelReviewer, tester)
 	modelIDs, err := llm.ParseModelIDs(os.Getenv(envModelCatalog))
 	if err != nil {
 		return modelSettings{}, fmt.Errorf("parse %s: %w", envModelCatalog, err)
 	}
 	if len(modelIDs) == 0 {
-		modelIDs = uniqueModels(config.Model, coder, tester)
-	} else if !containsModel(modelIDs, coder) || !containsModel(modelIDs, tester) {
-		return modelSettings{}, fmt.Errorf("%s must include the configured coder and test-writer defaults", envModelCatalog)
+		modelIDs = uniqueModels(config.Model, coder, tester, reviewer)
+	} else if !containsModel(modelIDs, coder) || !containsModel(modelIDs, tester) || !containsModel(modelIDs, reviewer) {
+		return modelSettings{}, fmt.Errorf("%s must include the configured coder, test-writer, and reviewer defaults", envModelCatalog)
 	}
 
 	catalog, err := llm.NewModelCatalog(factory, config.Model, modelIDs)
 	if err != nil {
 		return modelSettings{}, err
 	}
-	return modelSettings{catalog: catalog, coder: coder, tester: tester}, nil
+	return modelSettings{catalog: catalog, coder: coder, tester: tester, reviewer: reviewer}, nil
 }
 
 func uniqueModels(modelIDs ...string) []string {

@@ -71,13 +71,14 @@ func TestConfiguredModelsBuildsSafeRoleDefaults(t *testing.T) {
 	t.Setenv(envModelCatalog, "fast-model,strong-model")
 	t.Setenv(envModelCoder, "strong-model")
 	t.Setenv(envModelTester, "fast-model")
+	t.Setenv(envModelReviewer, "strong-model")
 
 	settings, err := configuredModels(testLLMConfig(), testFactory())
 	if err != nil {
 		t.Fatalf("configuredModels() error = %v", err)
 	}
-	if settings.coder != "strong-model" || settings.tester != "fast-model" {
-		t.Fatalf("role defaults = coder %q tester %q", settings.coder, settings.tester)
+	if settings.coder != "strong-model" || settings.tester != "fast-model" || settings.reviewer != "strong-model" {
+		t.Fatalf("role defaults = coder %q tester %q reviewer %q", settings.coder, settings.tester, settings.reviewer)
 	}
 	want := []llm.ModelOption{{ID: "fast-model"}, {ID: "strong-model"}}
 	if got := settings.catalog.Options(); !reflect.DeepEqual(got, want) {
@@ -89,13 +90,14 @@ func TestConfiguredModelsFallsBackAndRejectsMissingRoleDefault(t *testing.T) {
 	t.Setenv(envModelCatalog, "")
 	t.Setenv(envModelCoder, "")
 	t.Setenv(envModelTester, "")
+	t.Setenv(envModelReviewer, "")
 
 	settings, err := configuredModels(testLLMConfig(), testFactory())
 	if err != nil {
 		t.Fatalf("configuredModels() fallback error = %v", err)
 	}
-	if settings.coder != "default-model" || settings.tester != "default-model" {
-		t.Fatalf("fallback roles = coder %q tester %q", settings.coder, settings.tester)
+	if settings.coder != "default-model" || settings.tester != "default-model" || settings.reviewer != "default-model" {
+		t.Fatalf("fallback roles = coder %q tester %q reviewer %q", settings.coder, settings.tester, settings.reviewer)
 	}
 	if got := settings.catalog.Options(); !reflect.DeepEqual(got, []llm.ModelOption{{ID: "default-model"}}) {
 		t.Fatalf("fallback catalog = %#v", got)

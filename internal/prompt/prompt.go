@@ -34,6 +34,32 @@ func TestPrompt(spec, signature string) string {
 		testFileRequirements
 }
 
+// ReviewPrompt asks a separate oracle reviewer to assess proposed test source before it freezes.
+// It deliberately accepts test source but has no route for candidate code or verifier feedback.
+func ReviewPrompt(spec, signature, testSource string) string {
+	return "Review this proposed blind Go test oracle before it is frozen. You have not seen a candidate implementation. Judge it only against the submitted task specification and required signature. Do not write implementation code or solve the task yourself.\n\n" +
+		taskDetails(spec, signature) +
+		"<proposed-test-source>\n" + testSource + "\n</proposed-test-source>\n\n" +
+		"Return exactly one JSON object with no Markdown or explanation. Its only fields are `verdict` and `findings`. `verdict` must be `accept`, `revise`, or `reject`. `findings` must be an array of zero to six objects, each with only `category` and `summary`. A category must be one of `answer_key_provenance`, `boundary_error_coverage`, `validity_invariant_coverage`, or `unsupported_semantic_claim`. Use `accept` only when no finding is needed; use `revise` or `reject` only with one or more concise findings.\n"
+}
+
+// RevisionPrompt asks the blind oracle author for one replacement after a reviewer requested
+// revision. The author receives only task input, the proposed test source, and typed review
+// findings; candidate code and verifier feedback have no route into this prompt.
+func RevisionPrompt(spec, signature, testSource, findings string) string {
+	return "Revise the proposed blind Go test oracle using the reviewer findings below. You have not seen a candidate implementation. Return a complete replacement Go test source file, not a patch, Markdown, or explanation.\n\n" +
+		taskDetails(spec, signature) +
+		"<proposed-test-source>\n" + testSource + "\n</proposed-test-source>\n\n" +
+		"<review-findings>\n" + findings + "\n</review-findings>\n\n" +
+		testFileRequirements
+}
+
+// SignatureDraftPrompt asks for one proposed shared function signature. It has no route to an
+// oracle, candidate source, verifier feedback, or a run record.
+func SignatureDraftPrompt(spec string) string {
+	return "Propose one bodyless, top-level Go function signature for the task below. Return only the signature, with no package clause, function body, Markdown fence, explanation, tests, or implementation. Use only built-in Go types and standard-library types that can appear directly in a standalone signature. This is a draft for human confirmation, not a run.\n\nTask specification:\n" + spec + "\n"
+}
+
 func taskDetails(spec, signature string) string {
 	return "Task specification:\n" + spec + "\n\n" +
 		"Required signature:\n" + signature + "\n\n"

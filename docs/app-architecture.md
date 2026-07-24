@@ -68,7 +68,7 @@ factory, creates the allowed model catalog, constructs the checked-in Rulebook p
 oracle resolver and candidate executor, sets role defaults, injects presets, and wires `server`
 to `run`. No lower package imports an upper package.
 
-## Modular composition rule (F24 implemented; F25–F26 planned)
+## Modular composition rule (F24–F25 implemented; F26 planned)
 
 “Plug-and-play” here means explicit, small replacement seams—not a dynamically registered
 pipeline whose ordering is hard to audit. The current component direction is:
@@ -84,8 +84,8 @@ cmd/repair → constructs concrete defaults and injects them downward
 ```
 
 `internal/oracle` owns only pre-freeze work: Rulebook-guided source authoring, structural
-preflight, sealing, and resolution evidence. F25 may add bounded review/revision *inside that
-same component*. It returns a frozen bundle and typed evidence; it never sees candidate source,
+preflight, one bounded reviewer/revision pass, sealing, and resolution evidence. It returns a
+frozen bundle and typed evidence; it never sees candidate source,
 imports `repair`/`run`/`server`, or mutates a run record. `internal/verification` remains a
 deterministic sealer/digest validator, not a policy engine. `internal/repair` consumes the
 resolved bundle and owns candidate attempts; it does not know why a particular test rule exists.
@@ -116,11 +116,12 @@ does not create verification evidence.
 | Package | Responsibility |
 |---|---|
 | `internal/domain` | Dependency-free `Task`, `OracleMode`, `VerificationBundle` manifest/value types, `Attempt`, and pinned-signature validation. |
+| `internal/draft` | Stateless human-confirmed signature proposal; it depends only on `prompt`, `llm`, and `domain` and cannot create verification evidence. |
 | `internal/llm` | SDK-free completion interface, provider-neutral runtime config, safe errors, and role-agnostic model allowlist/catalog. |
 | `internal/llm/openai` | Official OpenAI Go SDK Chat Completions adapter, provider-local endpoint/key validation, timeout/retry policy, and opt-in live smoke test. |
 | `internal/prompt` | Pure prompt construction and conservative code-fence extraction. |
 | `internal/verification` | Generic immutable-bundle sealing, validation, and canonical task/bundle digests. It never sees candidate code or task-family semantics. |
-| `internal/oracle` | Pre-freeze source resolution: checked-in Rulebook guidance, blind source authoring, structural admission, sealing, and generic resolution evidence. F25 may add bounded review/revision here. |
+| `internal/oracle` | Pre-freeze source resolution: checked-in Rulebook guidance, blind source authoring, structural admission, one bounded review/revision pass, sealing, and generic resolution evidence. |
 | `internal/repair` | `Executor` boundary plus the default candidate generation, source-free Go verification, retry limits, and generic feedback against an already sealed bundle. |
 | `internal/run` | Bounded asynchronous runs, generic resolution-contract validation, snapshots, lifecycle phase, cancellation, and one-live-run guard. |
 | `internal/server` | Strict JSON API plus the embedded vanilla-JS page. |
@@ -136,6 +137,7 @@ does not create verification evidence.
 | `LLM_MODELS` | Optional comma-separated browser allowlist. Empty means `LLM_MODEL` plus any explicit role defaults. |
 | `LLM_MODEL_CODER` | Optional default code-writer model; falls back to `LLM_MODEL`. |
 | `LLM_MODEL_TESTER` | Optional default blind test-writer model; falls back to `LLM_MODEL`. |
+| `LLM_MODEL_REVIEWER` | Optional bounded oracle-reviewer model; falls back to the effective test-writer model and is not browser-selectable. |
 | `LLM_TIMEOUT` | Whole-call timeout for one completion. |
 
 `internal/llm.ModelCatalog` is provider-agnostic. It asks an injected `ClientFactory` for one
@@ -282,6 +284,7 @@ cancel function. It reports these live phases:
 | `starting` | Snapshot created. |
 | `writingoracle` | Test-writer completion is in flight; candidate attempt is `0`. |
 | `preflightingoracle` | A generated or authored source bundle is being checked before code exists. |
+| `reviewingoracle` | The configured reviewer is assessing structurally admitted generated source before it freezes. |
 | `waitingforprovider` | Code-writer completion is in flight. |
 | `verifying` | Go is building/testing the current candidate. |
 | `canceling` | User cancellation was accepted. |
@@ -295,6 +298,7 @@ provider/verifier result and are never recast as candidate failures.
 
 ```text
 GET  /setup                 → configured model IDs, role defaults, editable presets
+POST /signature-draft       → syntax-valid signature draft only; never starts a run
 POST /run                   → accepts task input, returns 202 {"id":"run_..."}
 POST /run/{id}/cancel       → requests cancellation of a live run
 GET  /run/{id}              → live Run snapshot
@@ -326,6 +330,8 @@ The page is a single embedded `index.html`. It uses `textContent`/DOM nodes for 
 verifier data, never HTML insertion. A compact form sits above the existing comparison layout:
 
 - Preset buttons populate editable task inputs without starting a run.
+- The signature-draft action uses the selected test-writer model, returns a syntax-valid proposal,
+  and requires an explicit browser action before it changes the editable signature.
 - The active run locks the form and exposes its role models.
 - The verification panel moves from pending to frozen source before code appears and names its
   origin, manifest version, and digest.
@@ -334,6 +340,26 @@ verifier data, never HTML insertion. A compact form sits above the existing comp
 - The page retains polling after ambiguous transport failure and offers cancellation.
 - Downloaded JSON is the final accepted-evidence snapshot; rejected oracle candidates and raw
   provider wrapper replies are not retained, and there is no disk persistence yet.
+
+## Planned task-template workflow (F6/F27)
+
+The current page is a temporary single-screen workflow. F6 introduces a source-free,
+project-root `templates/` repository, manually constructed at `cmd/repair` and injected into
+`server`. A template is not a run and is not verification evidence: it contains only a stable ID,
+display name, specification, and user-confirmed signature. It has no test source, expected value,
+Rulebook material, model selection, provider configuration, oracle mode, or bundle. The repository
+does not import `run`, `oracle`, or `repair`; `server` loads a selected template, constructs the
+same `OracleGenerated` task used for free-form browser input, and starts the existing store.
+
+F27 replaces the single document with explicit embedded routes for the template library and
+authoring pages, the template-launch page, and a stable per-run analysis page. Model selection is
+made only when launching a run; a saved template stays provider-agnostic. The run snapshot copies
+the submitted task as it does today and will carry an optional template ID/content digest for
+provenance. Editing a template therefore cannot alter an already-started or historical run.
+Template files persist across restarts, while run snapshots remain in memory until a separate
+persistence decision; final downloaded JSON remains the portable evidence record. Every browser
+launch remains generated-oracle mode, and the test writer still resolves/freezes the bundle before
+candidate generation.
 
 ## Deployment
 

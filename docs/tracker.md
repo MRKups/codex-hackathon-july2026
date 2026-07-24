@@ -1,6 +1,6 @@
 # Test Verifier — Implementation Tracker
 
-*Identifier counter: the next new items are **F27, C7, B4**.
+*Identifier counter: the next new items are **F28, C7, B4**.
 Branch strategy: `main` (active development and production during the hackathon).*
 
 > **Product-language decision, 2026-07-24.** The product is named **Test Verifier**. “Verifier
@@ -8,6 +8,30 @@ Branch strategy: `main` (active development and production during the hackathon)
 > `cmd/repair`, package paths, module name, and legacy document filenames remain stable. The public
 > README, current design/architecture headings, browser title, binary example, and user-facing run
 > language must lead with Test Verifier rather than implying that repair is the product.
+
+> **Task-template workflow decision, 2026-07-24.** A **task template** is a persisted, editable
+> authoring input: a name, specification, and confirmed Go signature. A **run** is one immutable
+> execution record: its submitted task snapshot, selected models, frozen verification bundle, and
+> attempts. Templates are stored under the project-root `templates/` directory and never contain
+> test source, expected values, Rulebook text, an oracle-mode choice, or provider configuration.
+> Selecting a template in the browser always starts the existing generated-oracle path; it does
+> not turn browser input into a trusted authored oracle. Template changes cannot alter a prior run,
+> whose task and frozen-bundle snapshots remain authoritative. Template persistence is separate
+> from run persistence: runs remain in memory and downloaded JSON remains the portable evidence
+> until a later explicit persistence feature. F6 supplies the source-free repository; F27 supplies
+> the multi-route authoring, launch, and analysis browser workflow.
+
+> **Continuation handoff, 2026-07-25.** F25 and F26 are implemented in the current uncommitted
+> worktree and their full verification suite passed without a provider call: `go build ./...`,
+> `go test -count=1 ./...`, `go test -race ./...`, `go vet ./...`, `go mod verify`, embedded
+> JavaScript syntax, and `git diff --check`. F25 adds the bounded reviewer/revision path,
+> `LLM_MODEL_REVIEWER`, `reviewingoracle`, and review provenance; F26 adds `internal/draft`,
+> `POST /signature-draft`, and explicit browser application of a syntax-valid draft. The next
+> implementation item is **F6**, then F27. F6 must be a concrete, source-free
+> `internal/template` repository manually wired from `cmd/repair`; add no browser-authored test
+> source, Oracle mode selector, task-family dispatch, persistence of runs, or dependency upward
+> from `template` into `server`/`run`/`oracle`/`repair`. Re-read the F6/F27 contracts below before
+> coding; retain the F25/F26 changes in the current worktree.
 
 > **Corrective design decision, 2026-07-21.** The first MinCoins profile was an invalid product
 > shortcut: an exact browser-text match silently chose task-specific semantic code. The active
@@ -280,7 +304,7 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   `go mod verify`, `git diff --check`, and the active task-routing audit passed. No provider
   request was made.
 
-- [ ] **F25 — Bounded generic oracle review pipeline v1.** Build on F24 with one explicit,
+- [x] **F25 — Bounded generic oracle review pipeline v1.** Build on F24 with one explicit,
   bounded pre-freeze sequence: oracle author → structural preflight → oracle reviewer → at most
   one author revision → structural preflight → freeze. The reviewer sees only spec, pinned
   signature, Rulebook, and proposed test source; it never sees candidate code. The candidate
@@ -300,11 +324,24 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   generic verification DSL in this item.
 
   Depends on: F24, F17.
-  Verification: fake author/reviewer tests cover accept, revise, reject, invalid review data,
-  cap exhaustion, cancellation, no candidate leakage to either oracle role, no oracle leakage to
-  the candidate author, exactly one final bundle, and truthful run phases/evidence.
+  Verification (2026-07-24): `internal/oracle` now parses strict 16 KiB reviewer JSON with
+  `accept`/`revise`/`reject`, one of four generic finding categories, at most six unique bounded
+  summaries, and no unknown fields or trailing values. It performs at most one review and one
+  revision after structural admission; reject, invalid data, and failed revision are typed
+  `oraclefailed` outcomes before candidate work. Resolution evidence records the Rulebook,
+  actual author/reviewer model IDs, call counts, final verdict, and findings outside the bundle
+  manifest; failure evidence contains no rejected source. `cmd/repair` configures
+  `LLM_MODEL_REVIEWER`, visibly records its fallback to the test-writer model, and never exposes a
+  browser reviewer picker. Run snapshots report `reviewingoracle`; candidate prompts remain
+  isolated from oracle source, Rulebook text, and reviewer findings.
 
-- [ ] **F26 — Human-confirmed Go signature drafting aid.** Add a separate task-authoring action,
+  Fake author/reviewer tests cover accept, revise, reject, invalid review data, structural cap
+  exhaustion, reviewer cancellation, prompt isolation, final evidence, and no candidate leakage;
+  run/server tests cover the reviewer role and snapshot boundary. `gofmt`, `go build ./...`,
+  `go test -count=1 ./...`, `go test -race ./...`, `go vet ./...`, `go mod verify`, and
+  `git diff --check` passed. No provider request was made.
+
+- [x] **F26 — Human-confirmed Go signature drafting aid.** Add a separate task-authoring action,
   not a run or oracle mode: an allowlisted model receives only the current specification and
   proposes one bodyless top-level Go function signature. A pure prompt plus strict source/size
   handling and `domain.ValidateSignature` gate the suggestion. `POST /signature-draft` returns a
@@ -316,9 +353,20 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   shared input that is digested and frozen before oracle resolution.
 
   Depends on: F24.
-  Verification: prompt isolation, malformed/oversized completion rejection, strict endpoint/model
-  validation, no run/oracle/candidate side effect, stale-browser-response protection, explicit
-  user application, and unchanged authoritative `POST /run` signature validation.
+  Verification (2026-07-24): added `internal/draft`, a stateless boundary that uses only a pure
+  signature-draft prompt, the selected allowlisted test-writer model, a 2 KiB completion bound,
+  conservative whole-fence extraction, and `domain.ValidateSignature`. It imports no oracle,
+  repair, run, or server package and cannot create verification evidence. `POST /signature-draft`
+  accepts only a bounded spec and configured test-writer model, returns only a syntax-valid draft,
+  and never touches the run store. The browser tracks the source specification while a request is
+  in flight, discards stale responses, and exposes an explicit **Use draft** action; it never
+  overwrites the signature automatically.
+
+  Prompt/service/handler tests cover isolation, malformed and oversized output, cancellation,
+  provider failure, strict request/model validation, and no run side effect. `gofmt`,
+  `go build ./...`, `go test -count=1 ./...`, `go test -race ./...`, `go vet ./...`,
+  `go mod verify`, inline-JavaScript syntax, and `git diff --check` must pass without a provider
+  call.
 
 - [ ] **F18 — Failure mode signal.** On `gaveup`, intersect failing test names across attempts
   and record `persistent` (the same frozen assertion kept failing) or `varied` (ordinary
@@ -334,12 +382,19 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   Caution: tune for a clear, honest demo first. For later comparisons, keep prompts fixed so
   prompt changes are not confused with the diagnostic signal (see C5).
 
-- [ ] **F6 — Task loading.** `internal/task`: load and return `domain.Task` values from `tasks/`
-  (each subdir = one task). `spec.md` is required and pins the signature; `solution_test.go` is
-  **optional** and its presence selects the mode — present → `OracleAuthored`, absent →
-  `OracleGenerated`. Do not infer executable verification from prose or browser input, and never
-  write a generated oracle back into `tasks/`. Keep this loader small and data-only.
-  Depends on: F4.
+- [ ] **F6 — Source-free task-template repository.** Replace the superseded optional-test-file
+  task-loader sketch with `internal/template`: a small data-only repository rooted at the
+  composition-root-configured project `templates/` directory. Each template directory contains one
+  versioned `template.json` with a stable validated ID, display name, specification, and confirmed
+  bodyless Go signature. List, load, create, and update operations must validate all data with the
+  same signature rules as a run, bound file sizes/counts, reject traversal and symlink escape, and
+  use atomic replacement for updates. The repository never accepts or returns `solution_test.go`,
+  a verification bundle, expected values, Rulebook material, oracle-mode choice, or provider
+  configuration. It returns template values, not `domain.Task` values; the server constructs the
+  generated task only when a user starts a run. Run snapshots later record an optional template ID
+  and canonical template-content digest as provenance outside the bundle manifest. Do not write a
+  generated oracle back into `templates/`.
+  Depends on: F26.
 
 ### Phase 2 — State (the bridge)
 
@@ -395,6 +450,33 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   network failures. Verification (2026-07-18): the inline script parsed, static checks
   found no external assets/framework or HTML injection API, and the server test serves it.
 
+- [ ] **F27 — Multi-route template authoring and run analysis UI.** Replace the one-screen
+  browser workflow with small embedded vanilla HTML/CSS/JS documents and explicit routes:
+  `/templates` for the library, `/templates/new` and `/templates/{id}` for focused authoring,
+  `/runs` for template selection and launch, and `/runs/{id}` for one evidence record. Add strict
+  JSON APIs for F6 list/load/create/update and for starting a generated-oracle run from a
+  server-loaded template; preserve the current strict run/cancel/snapshot protections and
+  idempotency. The authoring page validates and saves only template inputs, gives concise guidance,
+  and hosts the F26 signature-draft action with explicit user acceptance. The launch page shows a
+  selected template read-only, offers only configured coder/tester model IDs, and never exposes an
+  oracle-mode or test-source control. The analysis page moves the existing oracle/source/manifest,
+  candidate, capped-output, cancellation, and JSON-download views behind a stable run URL.
+
+  Use `textContent` for every untrusted value, no frontend framework/CDN/build chain, and an
+  explicit route allowlist rather than a client-side catch-all. The initial run list is only the
+  current process's snapshots; after restart it truthfully shows no history. Do not add SQLite,
+  automatic template execution, browser-side source loading, destructive template deletion, or a
+  generic workflow engine in this item.
+
+  Depends on: F6, F26, F9.
+  Verification: repository-backed handler tests cover list/load/save validation, traversal and
+  symlink rejection, atomic update behavior, template-to-generated-task conversion, template
+  provenance snapshotting, unknown-template rejection, idempotent launch, and one-live-run
+  protection. Browser tests cover every route, navigation, explicit signature-draft application,
+  untrusted text rendering, and a final run-detail evidence view. `go build ./...`,
+  `go test ./...`, `go test -race ./...`, `go vet ./...`, `go mod verify`, formatting, and
+  `git diff --check` must pass without a provider call.
+
 ### Phase 5 — Stretch (only if the above is solid)
 
 - [ ] **F10 — Attempt diffs.** Highlight what changed between consecutive attempts.
@@ -424,7 +506,7 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   2. `TestPrompt` may not accept candidate code, and `oracle.Resolver.Resolve` runs before any
      coder call exists to produce some. The ordering is the guarantee.
   3. The oracle is frozen once per run. Nothing may regenerate it after attempt 1, and a
-     generated oracle is never written back into `tasks/`.
+     generated oracle is never written back into `templates/`.
   Re-check whenever the task-authoring path or a prompt signature changes. **Widening one of
   those parameter lists voids the project's premise — flag it, don't do it.**
 

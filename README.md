@@ -124,12 +124,13 @@ The current composition root registers one provider adapter:
 | `LLM_MODELS` | No | Comma-separated browser model allowlist. |
 | `LLM_MODEL_CODER` | No | Default candidate-code model; falls back to `LLM_MODEL`. |
 | `LLM_MODEL_TESTER` | No | Default blind test-writer model; falls back to `LLM_MODEL`. |
+| `LLM_MODEL_REVIEWER` | No | Default bounded oracle-reviewer model; falls back to the effective test-writer model. |
 
 If `LLM_MODELS` is blank, the browser offers `LLM_MODEL` plus explicit role defaults. If it is
-set, it must include both effective defaults. The browser cannot discover provider models or
-choose another provider; all options use the configured endpoint and credential. Different role
-models can reduce correlated readings of an ambiguous specification, but they do not establish
-correctness.
+set, it must include all effective role defaults. The browser cannot discover provider models,
+choose another provider, or select the reviewer; all options use the configured endpoint and
+credential. Different role models can reduce correlated readings of an ambiguous specification,
+but they do not establish correctness.
 
 The verification platform adds no environment variables.
 
@@ -180,8 +181,11 @@ local address. Press `Ctrl-C` to stop the server.
 
 To use it:
 
-1. Click a preset or enter a task name, specification, and one bodyless Go function signature.
-2. Choose locally configured code-writer and test-writer models.
+1. Click a preset or enter a task name and specification. You may request a syntax-valid signature
+   draft from the selected test-writer model, then explicitly apply or edit it; drafting never
+   starts a run.
+2. Choose locally configured code-writer and test-writer models. The server uses its configured
+   reviewer model, falling back to the test-writer model when unset.
 3. Click **Start verification**.
 4. Inspect the pending oracle stage, then the frozen source, manifest, digest, candidate
    attempts, and capped feedback.

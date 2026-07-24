@@ -36,6 +36,7 @@ const (
 	PhaseStarting           Phase = "starting"
 	PhaseWritingOracle      Phase = "writingoracle"
 	PhasePreflightingOracle Phase = "preflightingoracle"
+	PhaseReviewingOracle    Phase = "reviewingoracle"
 	PhaseWaitingForProvider Phase = "waitingforprovider"
 	PhaseVerifying          Phase = "verifying"
 	PhaseCanceling          Phase = "canceling"
@@ -54,13 +55,15 @@ type Config struct {
 	RunTimeout  time.Duration
 }
 
-// Roles is the per-run pair of independently selected model clients. Tester is required only
-// for generated-oracle tasks. Model names are display metadata captured in the run record.
+// Roles is the per-run set of independently selected model clients. Tester and reviewer are
+// required only for generated-oracle tasks. Model names are captured in oracle evidence.
 type Roles struct {
-	Coder       llm.LLM
-	Tester      llm.LLM
-	CoderModel  string
-	TesterModel string
+	Coder         llm.LLM
+	Tester        llm.LLM
+	Reviewer      llm.LLM
+	CoderModel    string
+	TesterModel   string
+	ReviewerModel string
 }
 
 // Run is the JSON snapshot consumed by the browser. TestCode is the accepted frozen oracle
@@ -213,6 +216,12 @@ func validateStart(task domain.Task, roles Roles) (domain.OracleMode, error) {
 		if roles.Tester == nil {
 			return "", errors.New("test writer is required for a generated oracle")
 		}
+		if roles.Reviewer == nil {
+			return "", errors.New("oracle reviewer is required for a generated oracle")
+		}
+		if strings.TrimSpace(roles.TesterModel) == "" || strings.TrimSpace(roles.ReviewerModel) == "" {
+			return "", errors.New("test-writer and reviewer model IDs are required for a generated oracle")
+		}
 	default:
 		return "", fmt.Errorf("unknown oracle mode %q", task.Oracle)
 	}
@@ -232,6 +241,7 @@ func (store *Store) GetRun(id string) (Run, bool) {
 
 	snapshot := *stored
 	snapshot.Verification = (domain.VerificationBundle{Manifest: stored.Verification}).Clone().Manifest
+	snapshot.OracleEvidence = stored.OracleEvidence.Clone()
 	snapshot.Attempts = make([]domain.Attempt, len(stored.Attempts))
 	copy(snapshot.Attempts, stored.Attempts)
 	return snapshot, true
@@ -267,14 +277,20 @@ func (store *Store) CancelRun(id string) (found, canceled bool) {
 func (store *Store) execute(ctx context.Context, cancel context.CancelFunc, id string, task domain.Task, roles Roles) {
 	defer cancel()
 	resolution, err := store.resolver.Resolve(ctx, oracle.Request{
-		Task:   task,
-		Author: roles.Tester,
+		Task:          task,
+		Author:        roles.Tester,
+		AuthorModel:   roles.TesterModel,
+		Reviewer:      roles.Reviewer,
+		ReviewerModel: roles.ReviewerModel,
 	}, oracle.ProgressReporter{
 		WritingSource: func() {
 			store.setPhase(id, PhaseWritingOracle)
 		},
 		PreflightingSource: func() {
 			store.setPhase(id, PhasePreflightingOracle)
+		},
+		ReviewingSource: func() {
+			store.setPhase(id, PhaseReviewingOracle)
 		},
 	})
 
@@ -338,6 +354,12 @@ func (store *Store) execute(ctx context.Context, cancel context.CancelFunc, id s
 	}
 	var oracleFailure *oracle.OracleFailureError
 	if errors.As(err, &oracleFailure) {
+		if evidenceErr := oracle.ValidateFailureEvidence(task, oracleFailure.Evidence); evidenceErr != nil {
+			stored.Status = StatusInfrastructureFailed
+			stored.Error = fmt.Sprintf("validate oracle failure evidence: %v", evidenceErr)
+			return
+		}
+		stored.OracleEvidence = oracleFailure.Evidence.Clone()
 		stored.Status = StatusOracleFailed
 		stored.Error = oracleFailure.Error()
 		return
@@ -364,7 +386,7 @@ func (store *Store) setPhase(id string, phase Phase) {
 	}
 	stored.Stage = phase
 	switch phase {
-	case PhaseWritingOracle, PhasePreflightingOracle:
+	case PhaseWritingOracle, PhasePreflightingOracle, PhaseReviewingOracle:
 		stored.CurrentAttempt = 0
 	default:
 		stored.CurrentAttempt = len(stored.Attempts) + 1
@@ -385,7 +407,7 @@ func (store *Store) setResolution(ctx context.Context, id string, resolution ora
 	bundle := resolution.Bundle.Clone()
 	stored.TestCode = bundle.TestCode
 	stored.Verification = bundle.Manifest
-	stored.OracleEvidence = resolution.Evidence
+	stored.OracleEvidence = resolution.Evidence.Clone()
 	return true
 }
 

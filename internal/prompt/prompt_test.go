@@ -9,6 +9,8 @@ var (
 	_ func(string, string) string                 = FirstPrompt
 	_ func(string, string, string, string) string = RepairPrompt
 	_ func(string, string) string                 = TestPrompt
+	_ func(string, string, string) string         = ReviewPrompt
+	_ func(string, string, string, string) string = RevisionPrompt
 	_ func(string) string                         = ExtractGoCode
 )
 
@@ -100,6 +102,34 @@ func TestTestPrompt(t *testing.T) {
 	}
 	if strings.Contains(got, candidate) {
 		t.Fatalf("TestPrompt included candidate source: %q", got)
+	}
+}
+
+func TestReviewAndRevisionPromptsKeepCandidateCodeOut(t *testing.T) {
+	t.Parallel()
+
+	const (
+		spec      = "SPEC_SENTINEL: Return the sum of two integers."
+		signature = "func Solve(left, right int) int"
+		tests     = "package solution\n\nfunc TestSolve(t *testing.T) { t.Fatal(\"TEST_SOURCE_SENTINEL\") }"
+		findings  = "boundary_error_coverage: Include invalid inputs."
+		candidate = "package solution\n\nfunc Solve(left, right int) int { return left + right }"
+	)
+
+	review := ReviewPrompt(spec, signature, tests)
+	for _, want := range []string{spec, signature, tests, "exactly one JSON object", "answer_key_provenance", "unsupported_semantic_claim"} {
+		assertContainsOnce(t, review, want)
+	}
+	if strings.Contains(review, candidate) {
+		t.Fatalf("ReviewPrompt included candidate source: %q", review)
+	}
+
+	revision := RevisionPrompt(spec, signature, tests, findings)
+	for _, want := range []string{spec, signature, tests, findings, "complete replacement Go test source file", "no implementation"} {
+		assertContainsOnce(t, revision, want)
+	}
+	if strings.Contains(revision, candidate) {
+		t.Fatalf("RevisionPrompt included candidate source: %q", revision)
 	}
 }
 

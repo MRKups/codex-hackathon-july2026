@@ -145,7 +145,7 @@ temp-directory/file/process failure, or invalid user signature remains an ordina
 error rather than an oracle verdict. These structural checks are a guardrail, not proof that a
 generated oracle is semantically complete.
 
-## Oracle Rulebook (F24) and planned review pipeline (F25)
+## Oracle Rulebook and bounded review pipeline (F24–F25)
 
 F24 adds universal guidance, not a task-specific verifier. `internal/oracle` owns a checked-in,
 versioned Oracle Rulebook and includes it in every generated oracle-author prompt. It requires
@@ -153,27 +153,31 @@ source to derive only from the submitted spec/signature; prefer validity, bounda
 mutation, determinism, round-trip, and metamorphic checks; avoid untrusted non-trivial answer
 keys; and avoid unsupported exactness or optimality claims rather than inventing a solution. It is
 non-executable prompt policy, never browser input, task matching code, reference logic, or a
-third oracle origin. Its version/digest and source-author attempt count are separate generic run
-evidence; they do not change the VerificationBundle manifest or digest.
+third oracle origin. Its version/digest, actual author/reviewer model IDs, call counts, final
+review verdict, and bounded finding summaries are separate generic run evidence; they do not
+change the VerificationBundle manifest or digest.
 
 The current bounded resolution flow is:
 
 ```text
 spec + confirmed signature
         ↓
-oracle author + Rulebook → structural preflight
+oracle author + Rulebook → structural preflight → reviewer
+        ↓                         ↓ accept          ↓ revise (once)
+                     freeze VerificationBundle ← structural preflight
         ↓
-freeze VerificationBundle → existing candidate-repair loop
+existing candidate-repair loop
 ```
 
-F25 may insert one bounded reviewer/revision pass between structural preflight and freeze. That
-reviewer may see the proposed oracle source, spec, signature, and Rulebook, but never candidate
-code. The candidate author receives neither oracle source nor review material. Review data must
-be strict, bounded `accept`/`revise`/`reject` evidence with generic findings; invalid review data
-must fail the bounded oracle process rather than being guessed at. This improves reviewability,
-not the fundamental assurance limit: rules can establish legal output but do not generally prove
-an arbitrary exact or optimal result without a trusted reference, certificate, or bounded
-exhaustive check.
+F25 provides exactly one review pass after structural admission. The reviewer may see the proposed
+oracle source, spec, signature, and Rulebook, but never candidate code. Its untrusted output is
+strict, size-bounded JSON: `accept`, `revise`, or `reject`, plus at most six generic findings.
+`revise` permits one author replacement and one final structural preflight; it never starts a
+committee or regenerates an oracle after candidate work begins. Invalid review output, rejected
+source, or failed revision becomes `oraclefailed` before any candidate code exists. The coder sees
+neither oracle source nor review material. This improves reviewability, not the fundamental
+assurance limit: rules can establish legal output but do not generally prove an arbitrary exact or
+optimal result without a trusted reference, certificate, or bounded exhaustive check.
 
 ## VerificationBundle platform v1
 
@@ -268,14 +272,15 @@ one live run at a time to avoid accidental parallel provider cost. Its snapshot 
 - submitted task name/spec/signature;
 - `authored` or `generated` oracle mode, frozen source, and the complete verification-bundle
   manifest (version, origin, task digest, and bundle digest);
-- separate generic oracle evidence (Rulebook version/digest and source-author attempt count for
-  generated runs);
-- selected code-writer and test-writer model IDs;
+- separate generic oracle evidence (Rulebook version/digest, author/reviewer model IDs and call
+  counts, final review verdict, and bounded finding summaries for generated runs);
+- selected code-writer and test-writer model IDs, with the server-configured reviewer recorded in
+  oracle evidence;
 - candidate attempts and capped combined verifier output;
 - lifecycle stage, timestamps, deadline, status, and error text.
 
-Live stages are `starting`, `writingoracle`, `preflightingoracle`, `waitingforprovider`,
-`verifying`, and `canceling`; terminal snapshots use `complete`. Oracle stages use candidate
+Live stages are `starting`, `writingoracle`, `preflightingoracle`, `reviewingoracle`,
+`waitingforprovider`, `verifying`, and `canceling`; terminal snapshots use `complete`. Oracle stages use candidate
 attempt `0`. Terminal statuses are `passed`, `gaveup`, `canceled`, `timedout`,
 `oraclefailed`, and `infrastructurefailed`.
 
@@ -301,16 +306,18 @@ candidates and provider wrapper replies.
 | `-run-timeout` | Entire browser run, across tester, coder, and Go work. |
 
 `LLM_MODEL` remains required. `LLM_MODELS` is a local comma-separated browser allowlist.
-`LLM_MODEL_CODER` and `LLM_MODEL_TESTER` select defaults and fall back to `LLM_MODEL`. The
-browser sees only those IDs, never provider credentials, a provider selector, or an arbitrary
-model field. The current OpenAI adapter uses the official SDK's stateless Chat Completions
+`LLM_MODEL_CODER` and `LLM_MODEL_TESTER` select defaults and fall back to `LLM_MODEL`.
+`LLM_MODEL_REVIEWER` falls back to the effective test-writer model and is not browser-selectable.
+The browser sees only safe coder/test-writer IDs, never provider credentials, a provider selector,
+or an arbitrary model field. The current OpenAI adapter uses the official SDK's stateless Chat Completions
 surface with the explicitly configured base URL; a future Responses migration is a separate
 behavior change, not an implicit transport detail.
 
 ## Deferred work
 
 - F5: prompt tuning on a handful of real tasks.
-- F6: task folders and automatic task loading.
+- F6: a source-free project-root `templates/` repository for persisted task-template inputs.
+- F27: separate template authoring, template launch, and run-analysis browser routes.
 - F18: optional persistent/varied failure classification.
 - F10/F11/F13/F14: diffs, stronger oracle research, SSE, and persistence.
 - C2: transport/retry hardening before repeated external or production use.

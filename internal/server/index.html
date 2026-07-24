@@ -116,6 +116,7 @@
 
       #cancelButton[hidden],
       #downloadButton[hidden],
+	  #applySignatureDraftButton[hidden],
       #modelRoles[hidden],
       #comparisonControls[hidden] {
         display: none;
@@ -545,6 +546,13 @@
                 Pinned Go signature
                 <input id="signatureInput" name="signature" type="text" required autocomplete="off" spellcheck="false" placeholder="func Solve(input string) (string, error)">
               </label>
+			  <div class="wide form-actions">
+				<p class="helper" id="signatureDraftNote">Need a starting point? A draft is syntax-checked but not applied until you choose to use it.</p>
+				<div class="header-actions">
+				  <button id="signatureDraftButton" type="button">Suggest signature</button>
+				  <button id="applySignatureDraftButton" type="button" hidden>Use draft</button>
+				</div>
+			  </div>
             </div>
 
             <div class="preset-row">
@@ -570,6 +578,7 @@
         <div class="role-list">
           <span><strong>Coder:</strong> <code id="coderModelText">—</code></span>
           <span><strong>Blind test-writer:</strong> <code id="testerModelText">—</code></span>
+          <span><strong>Oracle reviewer:</strong> <code id="reviewerModelText">—</code></span>
         </div>
       </section>
 
@@ -655,7 +664,9 @@
           runID: null,
           setupReady: false,
           startRequestID: null,
-          rightAttempt: null
+          rightAttempt: null,
+          signatureDraftGeneration: 0,
+          signatureDraft: ""
         };
 
         var runForm = document.getElementById("runForm");
@@ -663,6 +674,9 @@
         var nameInput = document.getElementById("nameInput");
         var specInput = document.getElementById("specInput");
         var signatureInput = document.getElementById("signatureInput");
+        var signatureDraftButton = document.getElementById("signatureDraftButton");
+        var applySignatureDraftButton = document.getElementById("applySignatureDraftButton");
+        var signatureDraftNote = document.getElementById("signatureDraftNote");
         var coderModelSelect = document.getElementById("coderModelSelect");
         var testerModelSelect = document.getElementById("testerModelSelect");
         var presetButtons = document.getElementById("presetButtons");
@@ -675,6 +689,7 @@
         var modelRoles = document.getElementById("modelRoles");
         var coderModelText = document.getElementById("coderModelText");
         var testerModelText = document.getElementById("testerModelText");
+        var reviewerModelText = document.getElementById("reviewerModelText");
         var taskNameLabel = document.getElementById("taskNameLabel");
         var specText = document.getElementById("specText");
         var signatureText = document.getElementById("signatureText");
@@ -712,6 +727,8 @@
         runForm.addEventListener("submit", startRun);
         cancelButton.addEventListener("click", cancelRun);
         downloadButton.addEventListener("click", downloadRun);
+		signatureDraftButton.addEventListener("click", suggestSignature);
+		applySignatureDraftButton.addEventListener("click", useSignatureDraft);
         leftSelect.addEventListener("change", function () {
           state.leftAttempt = Number(leftSelect.value);
           renderComparison();
@@ -837,6 +854,61 @@
           specText.textContent = specInput.value || "Enter a specification to prepare a run.";
           signatureText.textContent = signatureInput.value || "No signature entered.";
           renderPendingOracle();
+        }
+
+        function suggestSignature() {
+          if (!state.setupReady || state.run) {
+            return;
+          }
+          var spec = specInput.value.trim();
+          if (!spec) {
+            signatureDraftNote.textContent = "Enter a specification before requesting a signature draft.";
+            return;
+          }
+          var generation = ++state.signatureDraftGeneration;
+          signatureDraftButton.disabled = true;
+          signatureDraftNote.textContent = "Requesting a syntax-checked signature draft. It will not change this form automatically.";
+          fetch("/signature-draft", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Accept": "application/json" },
+            body: JSON.stringify({ spec: spec, testerModel: testerModelSelect.value })
+          })
+            .then(readJSON)
+            .then(function (draft) {
+              if (generation !== state.signatureDraftGeneration || spec !== specInput.value.trim()) {
+                signatureDraftNote.textContent = "The specification changed while its draft was in flight, so the draft was not applied.";
+                return;
+              }
+              state.signatureDraft = stringValue(draft && draft.signature);
+              if (!state.signatureDraft) {
+                throw new Error("The server returned an empty signature draft.");
+              }
+              applySignatureDraftButton.hidden = false;
+              signatureDraftNote.textContent = "Suggested by " + (stringValue(draft && draft.model) || "the selected test-writer") + ": " + state.signatureDraft + " Review it, then choose Use draft to apply it.";
+            })
+            .catch(function (error) {
+              if (generation === state.signatureDraftGeneration) {
+                state.signatureDraft = "";
+                applySignatureDraftButton.hidden = true;
+                signatureDraftNote.textContent = errorMessage(error, "Signature drafting failed. The existing signature was not changed.");
+              }
+            })
+            .finally(function () {
+              if (generation === state.signatureDraftGeneration) {
+                signatureDraftButton.disabled = false;
+              }
+            });
+        }
+
+        function useSignatureDraft() {
+          if (!state.signatureDraft) {
+            return;
+          }
+          signatureInput.value = state.signatureDraft;
+          signatureDraftNote.textContent = "Draft applied to the editable signature. Confirm that it represents the task before starting a run.";
+          applySignatureDraftButton.hidden = true;
+          state.signatureDraft = "";
+          renderDraftContext();
         }
 
         function startRun(event) {
@@ -1162,6 +1234,9 @@
               ? "Preflighting the blind oracle before any candidate is requested…"
               : "Preflighting the authored oracle before any candidate is requested…";
           }
+          if (run && run.stage === "reviewingoracle") {
+            return "Reviewing the structurally admitted blind oracle before it freezes…";
+          }
           if (run && run.stage === "canceling") {
             return "Cancellation requested while the oracle was still pending.";
           }
@@ -1172,6 +1247,7 @@
           modelRoles.hidden = false;
           coderModelText.textContent = stringValue(run.coderModel) || coderModelSelect.value || "—";
           testerModelText.textContent = stringValue(run.testerModel) || testerModelSelect.value || "—";
+          reviewerModelText.textContent = stringValue(run.oracleEvidence && run.oracleEvidence.reviewerModel) || "—";
         }
 
         function renderActiveRun(run) {
@@ -1193,6 +1269,10 @@
               ? "Oracle work (attempt 0): checking the generated test source before any candidate is requested."
               : "Oracle work (attempt 0): checking the authored test source before any candidate is requested.") + timing;
             notice.textContent = "A verifier fault is not charged to the coder.";
+          } else if (run.stage === "reviewingoracle") {
+            setRunStatus("Reviewing oracle", "running");
+            runSummary.textContent = "Oracle work (attempt 0): reviewing the structurally admitted blind test source before freezing it." + timing;
+            notice.textContent = "The reviewer sees the specification, signature, Rulebook, and proposed oracle—not candidate code.";
           } else if (run.stage === "waitingforprovider") {
             setRunStatus("Waiting for coder", "running");
             runSummary.textContent = "Candidate attempt " + displayAttempt(attempt, run) + " of " + limit + ": waiting for the configured coder model." + timing;
@@ -1247,7 +1327,7 @@
         }
 
         function renderEmptyComparison(run) {
-          if (run.status === "running" && (run.stage === "writingoracle" || run.stage === "preflightingoracle")) {
+          if (run.status === "running" && (run.stage === "writingoracle" || run.stage === "preflightingoracle" || run.stage === "reviewingoracle")) {
             clearAttemptPane(panes.left, "Candidate source", "Candidate attempts wait for a frozen oracle.", "No candidate has been requested.");
             renderFeedback(null, null);
             clearAttemptPane(panes.right, "Later candidate", "No candidate can exist until oracle work completes.", "No later candidate yet.");
@@ -1468,6 +1548,11 @@
           }
           if (digest) {
             pieces.push("Bundle digest " + digest.slice(0, 12) + "…");
+          }
+          var evidence = run && run.oracleEvidence;
+          var verdict = stringValue(evidence && evidence.reviewVerdict);
+          if (verdict) {
+            pieces.push("Generated oracle review " + verdict + ".");
           }
           return pieces.join(" ");
         }

@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"codex-hackathon-july2026/internal/domain"
+	"codex-hackathon-july2026/internal/draft"
 	"codex-hackathon-july2026/internal/llm"
 	"codex-hackathon-july2026/internal/run"
 )
@@ -40,10 +41,12 @@ type Preset struct {
 // Config wires the HTTP layer to an in-memory store and a safe, provider-configured model
 // allowlist. It contains no provider credentials in any API response.
 type Config struct {
-	Store    *run.Store
-	Models   *llm.ModelCatalog
-	Defaults ModelDefaults
-	Presets  []Preset
+	Store         *run.Store
+	Models        *llm.ModelCatalog
+	Draft         *draft.Service
+	Defaults      ModelDefaults
+	ReviewerModel string
+	Presets       []Preset
 }
 
 // New returns the browser handler for interactive generated-oracle runs.
@@ -54,11 +57,17 @@ func New(config Config) (http.Handler, error) {
 	if config.Models == nil {
 		return nil, errors.New("model catalog is required")
 	}
+	if config.Draft == nil {
+		return nil, errors.New("signature draft service is required")
+	}
 	if _, err := config.Models.Resolve(config.Defaults.CoderModel); err != nil {
 		return nil, fmt.Errorf("resolve default coder model: %w", err)
 	}
 	if _, err := config.Models.Resolve(config.Defaults.TesterModel); err != nil {
 		return nil, fmt.Errorf("resolve default test-writer model: %w", err)
+	}
+	if _, err := config.Models.Resolve(config.ReviewerModel); err != nil {
+		return nil, fmt.Errorf("resolve default oracle reviewer model: %w", err)
 	}
 	for index, preset := range config.Presets {
 		if err := validatePreset(preset); err != nil {
@@ -75,6 +84,24 @@ func New(config Config) (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /setup", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, setup)
+	})
+	mux.HandleFunc("POST /signature-draft", func(writer http.ResponseWriter, request *http.Request) {
+		input, err := decodeSignatureDraftRequest(writer, request)
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+			return
+		}
+		author, err := config.Models.Resolve(input.TesterModel)
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "unknown test-writer model"})
+			return
+		}
+		signature, err := config.Draft.Suggest(request.Context(), author, input.Spec)
+		if err != nil {
+			writeJSON(writer, http.StatusBadGateway, errorResponse{Error: "signature drafting failed"})
+			return
+		}
+		writeJSON(writer, http.StatusOK, signatureDraftResponse{Signature: signature, Model: input.TesterModel})
 	})
 	mux.HandleFunc("POST /run", func(writer http.ResponseWriter, request *http.Request) {
 		input, err := decodeRunRequest(writer, request)
@@ -96,15 +123,22 @@ func New(config Config) (http.Handler, error) {
 			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "unknown test-writer model"})
 			return
 		}
+		reviewer, err := config.Models.Resolve(config.ReviewerModel)
+		if err != nil {
+			writeJSON(writer, http.StatusInternalServerError, errorResponse{Error: "configured oracle reviewer model is unavailable"})
+			return
+		}
 
 		id, err := starts.start(input.RequestID, func() (string, error) {
 			return config.Store.StartRun(
 				task,
 				run.Roles{
-					Coder:       coder,
-					Tester:      tester,
-					CoderModel:  input.CoderModel,
-					TesterModel: input.TesterModel,
+					Coder:         coder,
+					Tester:        tester,
+					Reviewer:      reviewer,
+					CoderModel:    input.CoderModel,
+					TesterModel:   input.TesterModel,
+					ReviewerModel: config.ReviewerModel,
 				},
 			)
 		})
@@ -159,6 +193,16 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
+type signatureDraftRequest struct {
+	Spec        string `json:"spec"`
+	TesterModel string `json:"testerModel"`
+}
+
+type signatureDraftResponse struct {
+	Signature string `json:"signature"`
+	Model     string `json:"model"`
+}
+
 type runRequest struct {
 	RequestID   string `json:"requestId"`
 	Name        string `json:"name"`
@@ -190,6 +234,31 @@ func decodeRunRequest(writer http.ResponseWriter, request *http.Request) (runReq
 		return runRequest{}, err
 	}
 	return normalizeRunRequest(input)
+}
+
+func decodeSignatureDraftRequest(writer http.ResponseWriter, request *http.Request) (signatureDraftRequest, error) {
+	request.Body = http.MaxBytesReader(writer, request.Body, maxRunRequestBytes)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	var input signatureDraftRequest
+	if err := decoder.Decode(&input); err != nil {
+		return signatureDraftRequest{}, fmt.Errorf("invalid signature draft request: %w", err)
+	}
+	if err := ensureSingleJSONValue(decoder); err != nil {
+		return signatureDraftRequest{}, err
+	}
+	input.Spec = strings.TrimSpace(input.Spec)
+	input.TesterModel = strings.TrimSpace(input.TesterModel)
+	if input.Spec == "" {
+		return signatureDraftRequest{}, errors.New("task specification is required")
+	}
+	if len(input.Spec) > maxSpecBytes {
+		return signatureDraftRequest{}, fmt.Errorf("task specification exceeds %d bytes", maxSpecBytes)
+	}
+	if input.TesterModel == "" {
+		return signatureDraftRequest{}, errors.New("test-writer model is required")
+	}
+	return input, nil
 }
 
 func ensureSingleJSONValue(decoder *json.Decoder) error {
