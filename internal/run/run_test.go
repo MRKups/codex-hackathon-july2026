@@ -9,6 +9,10 @@ import (
 	"time"
 
 	"codex-hackathon-july2026/internal/domain"
+	"codex-hackathon-july2026/internal/llm"
+	"codex-hackathon-july2026/internal/oracle"
+	"codex-hackathon-july2026/internal/repair"
+	"codex-hackathon-july2026/internal/verification"
 )
 
 func TestStoreRecordsGeneratedOracleAndRepairAttempts(t *testing.T) {
@@ -26,7 +30,7 @@ func Increment(value int) int {
 `
 	tester := &scriptedLLM{responses: []scriptedResponse{{text: incrementTestCode}}}
 	coder := &scriptedLLM{responses: []scriptedResponse{{text: wrongCode}, {text: correctCode}}}
-	store := newStore(t, Config{MaxAttempts: 2, OracleAttempts: 1, TestTimeout: 10 * time.Second, RunTimeout: time.Minute})
+	store := newStore(t, Config{MaxAttempts: 2, TestTimeout: 10 * time.Second, RunTimeout: time.Minute})
 
 	id, err := store.StartRun(generatedIncrementTask(), Roles{
 		Coder:       coder,
@@ -47,6 +51,12 @@ func Increment(value int) int {
 	}
 	if got.TestCode != incrementTestCode {
 		t.Fatalf("frozen oracle = %q, want generated test source", got.TestCode)
+	}
+	if got.Verification.Origin != domain.VerificationOriginGenerated || got.Verification.TaskDigest == "" || got.Verification.Digest == "" {
+		t.Fatalf("generated verification manifest = %#v, want generated origin and non-empty digests", got.Verification)
+	}
+	if got.OracleEvidence.RulebookVersion == "" || got.OracleEvidence.RulebookDigest == "" || got.OracleEvidence.AuthorAttempts != 1 {
+		t.Fatalf("generated oracle evidence = %#v, want Rulebook provenance and one author attempt", got.OracleEvidence)
 	}
 	if got.CoderModel != "code-model" || got.TesterModel != "test-model" {
 		t.Fatalf("run role models = coder %q tester %q, want selected values", got.CoderModel, got.TesterModel)
@@ -84,7 +94,7 @@ func Increment(value int) int {
 	return value + 1
 }
 `
-	store := newStore(t, Config{MaxAttempts: 1, OracleAttempts: 1, TestTimeout: 10 * time.Second, RunTimeout: time.Minute})
+	store := newStore(t, Config{MaxAttempts: 1, TestTimeout: 10 * time.Second, RunTimeout: time.Minute})
 	id, err := store.StartRun(incrementTask(), Roles{Coder: &scriptedLLM{responses: []scriptedResponse{{text: correctCode}}}, CoderModel: "control-model"})
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
@@ -96,14 +106,259 @@ func Increment(value int) int {
 	if got.Oracle != string(domain.OracleAuthored) || got.TestCode != incrementTestCode {
 		t.Fatalf("authored snapshot = oracle %q test %q, want fixed authored test", got.Oracle, got.TestCode)
 	}
+	if got.Verification.Origin != domain.VerificationOriginAuthored || got.Verification.TaskDigest == "" || got.Verification.Digest == "" {
+		t.Fatalf("authored verification manifest = %#v, want authored origin and non-empty digests", got.Verification)
+	}
+	if got.OracleEvidence != (oracle.Evidence{}) {
+		t.Fatalf("authored oracle evidence = %#v, want zero generated-policy evidence", got.OracleEvidence)
+	}
 	if got.TesterModel != "" {
 		t.Fatalf("authored tester model = %q, want empty", got.TesterModel)
 	}
 }
 
+func TestStoreUsesTheInjectedResolverBeforeCandidateRepair(t *testing.T) {
+	task := incrementTask()
+	bundle, err := verification.AuthoredSource(task, task.TestCode)
+	if err != nil {
+		t.Fatalf("AuthoredSource() error = %v", err)
+	}
+	resolver := &recordingResolver{resolution: oracle.Resolution{Bundle: bundle}}
+	executor := &recordingExecutor{result: domain.Attempt{N: 1, Passed: true}}
+	store, err := NewStore(Config{MaxAttempts: 1, TestTimeout: 10 * time.Second, RunTimeout: time.Minute}, resolver, executor)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	id, err := store.StartRun(task, Roles{Coder: failLLM{}})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	got := waitForTerminalRun(t, store, id)
+	if got.Status != StatusPassed {
+		t.Fatalf("run status = %q, want passed; error = %q", got.Status, got.Error)
+	}
+	calls, request := resolver.snapshot()
+	if calls != 1 || request.Task != task || request.Author != nil {
+		t.Fatalf("resolver request = %#v calls=%d, want one authored request without source author", request, calls)
+	}
+	executorCalls, candidateRequest := executor.snapshot()
+	wantRequest := repair.CandidateRequest{Spec: task.Spec, Signature: task.Signature, Bundle: bundle}
+	if executorCalls != 1 || candidateRequest != wantRequest {
+		t.Fatalf("executor received calls=%d request=%#v, want one exact narrow candidate handoff %#v", executorCalls, candidateRequest, wantRequest)
+	}
+}
+
+func TestStoreKeepsCandidateAttemptZeroUntilResolution(t *testing.T) {
+	authoredTask := incrementTask()
+	authoredBundle, err := verification.AuthoredSource(authoredTask, authoredTask.TestCode)
+	if err != nil {
+		t.Fatalf("AuthoredSource() error = %v", err)
+	}
+	generatedTask := generatedIncrementTask()
+	generatedBundle, err := verification.GeneratedSource(generatedTask, incrementTestCode)
+	if err != nil {
+		t.Fatalf("GeneratedSource() error = %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		task       domain.Task
+		resolution oracle.Resolution
+		roles      Roles
+	}{
+		{
+			name:       "authored",
+			task:       authoredTask,
+			resolution: oracle.Resolution{Bundle: authoredBundle},
+			roles:      Roles{Coder: failLLM{}},
+		},
+		{
+			name: "generated",
+			task: generatedTask,
+			resolution: oracle.Resolution{
+				Bundle:   generatedBundle,
+				Evidence: generatedEvidence(),
+			},
+			roles: Roles{Coder: failLLM{}, Tester: failLLM{}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resolver := newGatedResolver(tt.resolution)
+			executor := &recordingExecutor{result: domain.Attempt{N: 1, Passed: true}}
+			store, err := NewStore(Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute}, resolver, executor)
+			if err != nil {
+				t.Fatalf("NewStore() error = %v", err)
+			}
+			id, err := store.StartRun(tt.task, tt.roles)
+			if err != nil {
+				t.Fatalf("StartRun() error = %v", err)
+			}
+			waitForSignal(t, resolver.started, "resolver call")
+			active, found := store.GetRun(id)
+			if !found {
+				t.Fatal("GetRun() did not find started run")
+			}
+			if active.CurrentAttempt != 0 || active.TestCode != "" || active.Verification != (domain.VerificationManifest{}) {
+				t.Fatalf("pre-resolution snapshot = %#v, want candidate attempt 0 and no published bundle", active)
+			}
+			if calls, _ := executor.snapshot(); calls != 0 {
+				t.Fatalf("executor calls before resolution = %d, want 0", calls)
+			}
+
+			close(resolver.release)
+			if got := waitForTerminalRun(t, store, id); got.Status != StatusPassed {
+				t.Fatalf("run status = %q, want passed; error = %q", got.Status, got.Error)
+			}
+		})
+	}
+}
+
+func TestStoreDoesNotLeakOracleMaterialThroughCandidatePath(t *testing.T) {
+	task := generatedIncrementTask()
+	const oracleSourceSentinel = "RUN_ORACLE_SOURCE_SENTINEL"
+	source := `package solution
+
+import "testing"
+
+// RUN_ORACLE_SOURCE_SENTINEL must never enter a candidate prompt.
+func TestIncrement(t *testing.T) {
+	if got := Increment(2); got != 3 {
+		t.Fatalf("Increment(2) = %d, want 3", got)
+	}
+}
+`
+	bundle, err := verification.GeneratedSource(task, source)
+	if err != nil {
+		t.Fatalf("GeneratedSource() error = %v", err)
+	}
+	resolver := newGatedResolver(oracle.Resolution{Bundle: bundle, Evidence: generatedEvidence()})
+	correctCode := `package solution
+
+func Increment(value int) int { return value + 1 }
+`
+	coder := &scriptedLLM{responses: []scriptedResponse{{text: correctCode}}}
+	store, err := NewStore(Config{MaxAttempts: 1, TestTimeout: 10 * time.Second, RunTimeout: time.Minute}, resolver, repair.NewExecutor())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	id, err := store.StartRun(task, Roles{Coder: coder, Tester: failLLM{}})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	waitForSignal(t, resolver.started, "resolver call")
+	if coder.callCount() != 0 {
+		t.Fatalf("coder calls before resolution = %d, want 0", coder.callCount())
+	}
+
+	close(resolver.release)
+	if got := waitForTerminalRun(t, store, id); got.Status != StatusPassed {
+		t.Fatalf("run status = %q, want passed; error = %q", got.Status, got.Error)
+	}
+	prompts := coder.promptSnapshot()
+	if len(prompts) != 1 {
+		t.Fatalf("coder prompts = %d, want 1", len(prompts))
+	}
+	for _, forbidden := range []string{oracleSourceSentinel, oracle.DefaultRulebook().PromptText()} {
+		if strings.Contains(prompts[0], forbidden) {
+			t.Fatalf("candidate prompt leaked oracle material %q:\n%s", forbidden, prompts[0])
+		}
+	}
+}
+
+func TestStoreRejectsInvalidInjectedResolutionBeforeSnapshotOrCandidate(t *testing.T) {
+	task := generatedIncrementTask()
+	generatedBundle, err := verification.GeneratedSource(task, incrementTestCode)
+	if err != nil {
+		t.Fatalf("GeneratedSource() error = %v", err)
+	}
+	authoredBundle, err := verification.AuthoredSource(task, incrementTestCode)
+	if err != nil {
+		t.Fatalf("AuthoredSource() error = %v", err)
+	}
+	tamperedBundle := generatedBundle
+	tamperedBundle.TestCode += "// digest drift\n"
+
+	tests := []struct {
+		name       string
+		resolution oracle.Resolution
+	}{
+		{
+			name:       "wrong origin",
+			resolution: oracle.Resolution{Bundle: authoredBundle, Evidence: generatedEvidence()},
+		},
+		{
+			name:       "tampered source",
+			resolution: oracle.Resolution{Bundle: tamperedBundle, Evidence: generatedEvidence()},
+		},
+		{
+			name:       "missing generated evidence",
+			resolution: oracle.Resolution{Bundle: generatedBundle},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executor := &recordingExecutor{result: domain.Attempt{N: 1, Passed: true}}
+			store, err := NewStore(Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute}, &recordingResolver{resolution: tt.resolution}, executor)
+			if err != nil {
+				t.Fatalf("NewStore() error = %v", err)
+			}
+			coder := &countingFailLLM{}
+			id, err := store.StartRun(task, Roles{Coder: coder, Tester: failLLM{}})
+			if err != nil {
+				t.Fatalf("StartRun() error = %v", err)
+			}
+			got := waitForTerminalRun(t, store, id)
+			if got.Status != StatusInfrastructureFailed {
+				t.Fatalf("run status = %q, want infrastructurefailed; error = %q", got.Status, got.Error)
+			}
+			if got.TestCode != "" || got.Verification != (domain.VerificationManifest{}) || got.OracleEvidence != (oracle.Evidence{}) {
+				t.Fatalf("invalid resolution leaked into snapshot: %#v", got)
+			}
+			if calls, _ := executor.snapshot(); calls != 0 || coder.callCount() != 0 {
+				t.Fatalf("candidate work started after invalid resolution: executor=%d coder=%d", calls, coder.callCount())
+			}
+		})
+	}
+}
+
+func TestStoreDoesNotPublishLateResolutionAfterTimeout(t *testing.T) {
+	task := incrementTask()
+	bundle, err := verification.AuthoredSource(task, task.TestCode)
+	if err != nil {
+		t.Fatalf("AuthoredSource() error = %v", err)
+	}
+	resolver := newLateResolver(oracle.Resolution{Bundle: bundle})
+	executor := &recordingExecutor{result: domain.Attempt{N: 1, Passed: true}}
+	store, err := NewStore(Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: 75 * time.Millisecond}, resolver, executor)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	id, err := store.StartRun(task, Roles{Coder: failLLM{}})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	waitForSignal(t, resolver.started, "resolver call")
+	waitForSignal(t, resolver.contextDone, "run deadline")
+	close(resolver.release)
+
+	got := waitForTerminalRun(t, store, id)
+	if got.Status != StatusTimedOut {
+		t.Fatalf("run status = %q, want timedout; error = %q", got.Status, got.Error)
+	}
+	if got.TestCode != "" || got.Verification != (domain.VerificationManifest{}) || got.OracleEvidence != (oracle.Evidence{}) {
+		t.Fatalf("late resolution leaked into timed-out snapshot: %#v", got)
+	}
+	if calls, _ := executor.snapshot(); calls != 0 {
+		t.Fatalf("executor calls after late resolution = %d, want 0", calls)
+	}
+}
+
 func TestStorePublishesWritingOracleAndCancelsTestWriter(t *testing.T) {
 	tester := newBlockingLLM()
-	store := newStore(t, Config{MaxAttempts: 1, OracleAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute})
+	store := newStore(t, Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute})
 
 	id, err := store.StartRun(generatedIncrementTask(), Roles{Coder: failLLM{}, Tester: tester})
 	if err != nil {
@@ -130,7 +385,7 @@ func TestStorePublishesWritingOracleAndCancelsTestWriter(t *testing.T) {
 
 func TestStoreTimesOutWhileWritingOracle(t *testing.T) {
 	tester := newBlockingLLM()
-	store := newStore(t, Config{MaxAttempts: 1, OracleAttempts: 1, TestTimeout: time.Second, RunTimeout: 100 * time.Millisecond})
+	store := newStore(t, Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: 100 * time.Millisecond})
 	id, err := store.StartRun(generatedIncrementTask(), Roles{Coder: failLLM{}, Tester: tester})
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
@@ -151,7 +406,7 @@ func TestStoreClassifiesRejectedGeneratedOracle(t *testing.T) {
 import "testing"
 `}}}
 	coder := &countingFailLLM{}
-	store := newStore(t, Config{MaxAttempts: 1, OracleAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute})
+	store := newStore(t, Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute})
 	id, err := store.StartRun(generatedIncrementTask(), Roles{Coder: coder, Tester: tester})
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
@@ -175,7 +430,7 @@ func Increment(value int) int {
 	return value + 1
 }
 `
-	store := newStore(t, Config{MaxAttempts: 1, OracleAttempts: 1, TestTimeout: 10 * time.Second, RunTimeout: time.Minute})
+	store := newStore(t, Config{MaxAttempts: 1, TestTimeout: 10 * time.Second, RunTimeout: time.Minute})
 	id, err := store.StartRun(slowIncrementTask(), Roles{Coder: &scriptedLLM{responses: []scriptedResponse{{text: correctCode}}}})
 	if err != nil {
 		t.Fatalf("StartRun() error = %v", err)
@@ -191,7 +446,7 @@ func Increment(value int) int {
 
 func TestStoreRejectsSecondLiveRun(t *testing.T) {
 	coder := newBlockingLLM()
-	store := newStore(t, Config{MaxAttempts: 1, OracleAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute})
+	store := newStore(t, Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute})
 	id, err := store.StartRun(incrementTask(), Roles{Coder: coder})
 	if err != nil {
 		t.Fatalf("first StartRun() error = %v", err)
@@ -205,10 +460,25 @@ func TestStoreRejectsSecondLiveRun(t *testing.T) {
 }
 
 func TestStoreRejectsInvalidInputs(t *testing.T) {
-	if _, err := NewStore(Config{}); err == nil {
+	if _, err := NewStore(Config{}, nil, nil); err == nil {
 		t.Fatal("NewStore(Config{}) error = nil, want validation error")
 	}
-	store := newStore(t, Config{MaxAttempts: 1, OracleAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute})
+	if _, err := NewStore(Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute}, nil, repair.NewExecutor()); err == nil {
+		t.Fatal("NewStore(nil resolver) error = nil, want validation error")
+	}
+	resolver, err := oracle.NewResolver(oracle.Config{
+		MaxAttempts:      1,
+		PreflightTimeout: time.Second,
+		Rulebook:         oracle.DefaultRulebook(),
+		Admitter:         oracle.NewStructuralAdmitter(),
+	})
+	if err != nil {
+		t.Fatalf("NewResolver() error = %v", err)
+	}
+	if _, err := NewStore(Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute}, resolver, nil); err == nil {
+		t.Fatal("NewStore(nil executor) error = nil, want validation error")
+	}
+	store := newStore(t, Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute})
 	if _, err := store.StartRun(domain.Task{}, Roles{}); err == nil {
 		t.Fatal("StartRun(empty task) error = nil, want validation error")
 	}
@@ -219,7 +489,16 @@ func TestStoreRejectsInvalidInputs(t *testing.T) {
 
 func newStore(t *testing.T, config Config) *Store {
 	t.Helper()
-	store, err := NewStore(config)
+	resolver, err := oracle.NewResolver(oracle.Config{
+		MaxAttempts:      1,
+		PreflightTimeout: config.TestTimeout,
+		Rulebook:         oracle.DefaultRulebook(),
+		Admitter:         oracle.NewStructuralAdmitter(),
+	})
+	if err != nil {
+		t.Fatalf("NewResolver() error = %v", err)
+	}
+	store, err := NewStore(config, resolver, repair.NewExecutor())
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
@@ -281,12 +560,14 @@ type scriptedLLM struct {
 	mu        sync.Mutex
 	responses []scriptedResponse
 	calls     int
+	prompts   []string
 }
 
-func (model *scriptedLLM) Complete(_ context.Context, _ string) (string, error) {
+func (model *scriptedLLM) Complete(_ context.Context, promptText string) (string, error) {
 	model.mu.Lock()
 	defer model.mu.Unlock()
 	model.calls++
+	model.prompts = append(model.prompts, promptText)
 	if len(model.responses) == 0 {
 		return "", errors.New("unexpected completion request")
 	}
@@ -299,6 +580,12 @@ func (model *scriptedLLM) callCount() int {
 	model.mu.Lock()
 	defer model.mu.Unlock()
 	return model.calls
+}
+
+func (model *scriptedLLM) promptSnapshot() []string {
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	return append([]string(nil), model.prompts...)
 }
 
 type blockingLLM struct {
@@ -340,6 +627,132 @@ func (model *countingFailLLM) callCount() int {
 	model.mu.Lock()
 	defer model.mu.Unlock()
 	return model.calls
+}
+
+type recordingResolver struct {
+	mu          sync.Mutex
+	resolution  oracle.Resolution
+	calls       int
+	lastRequest oracle.Request
+}
+
+func (resolver *recordingResolver) Resolve(_ context.Context, request oracle.Request, report oracle.ProgressReporter) (oracle.Resolution, error) {
+	if report.PreflightingSource != nil {
+		report.PreflightingSource()
+	}
+	resolver.mu.Lock()
+	defer resolver.mu.Unlock()
+	resolver.calls++
+	resolver.lastRequest = request
+	return resolver.resolution, nil
+}
+
+func (resolver *recordingResolver) snapshot() (int, oracle.Request) {
+	resolver.mu.Lock()
+	defer resolver.mu.Unlock()
+	return resolver.calls, resolver.lastRequest
+}
+
+type recordingExecutor struct {
+	mu          sync.Mutex
+	result      domain.Attempt
+	err         error
+	calls       int
+	lastRequest repair.CandidateRequest
+}
+
+func (executor *recordingExecutor) Execute(_ context.Context, _ llm.LLM, request repair.CandidateRequest, _ repair.Config, report repair.ProgressReporter) (domain.Attempt, error) {
+	executor.mu.Lock()
+	executor.calls++
+	executor.lastRequest = request
+	result := executor.result
+	err := executor.err
+	executor.mu.Unlock()
+
+	if result.N != 0 && report.AttemptFinished != nil {
+		if reportErr := report.AttemptFinished(result); reportErr != nil {
+			return result, reportErr
+		}
+	}
+	return result, err
+}
+
+func (executor *recordingExecutor) snapshot() (int, repair.CandidateRequest) {
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	return executor.calls, executor.lastRequest
+}
+
+type gatedResolver struct {
+	resolution oracle.Resolution
+	started    chan struct{}
+	release    chan struct{}
+	once       sync.Once
+}
+
+func newGatedResolver(resolution oracle.Resolution) *gatedResolver {
+	return &gatedResolver{
+		resolution: resolution,
+		started:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+}
+
+func (resolver *gatedResolver) Resolve(ctx context.Context, _ oracle.Request, report oracle.ProgressReporter) (oracle.Resolution, error) {
+	if report.PreflightingSource != nil {
+		report.PreflightingSource()
+	}
+	resolver.once.Do(func() {
+		close(resolver.started)
+	})
+	select {
+	case <-resolver.release:
+		return resolver.resolution, nil
+	case <-ctx.Done():
+		return oracle.Resolution{}, ctx.Err()
+	}
+}
+
+type lateResolver struct {
+	resolution   oracle.Resolution
+	started      chan struct{}
+	contextDone  chan struct{}
+	release      chan struct{}
+	startedOnce  sync.Once
+	deadlineOnce sync.Once
+}
+
+func newLateResolver(resolution oracle.Resolution) *lateResolver {
+	return &lateResolver{
+		resolution:  resolution,
+		started:     make(chan struct{}),
+		contextDone: make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+}
+
+func (resolver *lateResolver) Resolve(ctx context.Context, _ oracle.Request, report oracle.ProgressReporter) (oracle.Resolution, error) {
+	if report.PreflightingSource != nil {
+		report.PreflightingSource()
+	}
+	resolver.startedOnce.Do(func() {
+		close(resolver.started)
+	})
+	<-ctx.Done()
+	resolver.deadlineOnce.Do(func() {
+		close(resolver.contextDone)
+	})
+	<-resolver.release
+	return resolver.resolution, nil
+}
+
+func generatedEvidence() oracle.Evidence {
+	rulebook := oracle.DefaultRulebook()
+	return oracle.Evidence{
+		RulebookVersion: rulebook.Version,
+		RulebookDigest:  rulebook.Digest(),
+		AuthorAttempts:  1,
+	}
 }
 
 const incrementTestCode = `package solution

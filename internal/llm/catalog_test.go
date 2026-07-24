@@ -2,13 +2,10 @@ package llm
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
+	"fmt"
 	"reflect"
 	"testing"
-	"time"
 )
 
 func TestParseModelIDs(t *testing.T) {
@@ -53,32 +50,8 @@ func TestParseModelIDs(t *testing.T) {
 }
 
 func TestModelCatalogResolvesOnlyConfiguredReusableClients(t *testing.T) {
-	var receivedModels []string
-	provider := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		var completion completionRequest
-		if err := json.NewDecoder(request.Body).Decode(&completion); err != nil {
-			t.Errorf("decode completion request: %v", err)
-			return
-		}
-		receivedModels = append(receivedModels, completion.Model)
-
-		response.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(response).Encode(completionResponse{
-			Choices: []completionChoice{{
-				Message: chatMessage{Role: "assistant", Content: "package solution"},
-			}},
-		}); err != nil {
-			t.Errorf("encode completion response: %v", err)
-		}
-	}))
-	defer provider.Close()
-
-	catalog, err := NewModelCatalog(Config{
-		BaseURL: provider.URL,
-		APIKey:  "test-key",
-		Model:   "default-model",
-		Timeout: time.Second,
-	}, []string{" model-one ", "model-two"})
+	factory := &recordingFactory{}
+	catalog, err := NewModelCatalog(factory, "default-model", []string{" model-one ", "model-two"})
 	if err != nil {
 		t.Fatalf("NewModelCatalog() error = %v", err)
 	}
@@ -86,6 +59,9 @@ func TestModelCatalogResolvesOnlyConfiguredReusableClients(t *testing.T) {
 	wantOptions := []ModelOption{{ID: "model-one"}, {ID: "model-two"}}
 	if got := catalog.Options(); !reflect.DeepEqual(got, wantOptions) {
 		t.Errorf("Options() = %#v, want %#v", got, wantOptions)
+	}
+	if want := []string{"model-one", "model-two"}; !reflect.DeepEqual(factory.models, want) {
+		t.Errorf("factory model IDs = %#v, want %#v", factory.models, want)
 	}
 
 	options := catalog.Options()
@@ -106,19 +82,11 @@ func TestModelCatalogResolvesOnlyConfiguredReusableClients(t *testing.T) {
 		t.Error("Resolve(model-one) returned different clients for the same configured model")
 	}
 
-	second, err := catalog.Resolve("model-two")
-	if err != nil {
+	if _, err := catalog.Resolve("model-two"); err != nil {
 		t.Fatalf("Resolve(model-two) error = %v", err)
 	}
 	if _, err := first.Complete(context.Background(), "first prompt"); err != nil {
 		t.Fatalf("first.Complete() error = %v", err)
-	}
-	if _, err := second.Complete(context.Background(), "second prompt"); err != nil {
-		t.Fatalf("second.Complete() error = %v", err)
-	}
-
-	if want := []string{"model-one", "model-two"}; !reflect.DeepEqual(receivedModels, want) {
-		t.Errorf("provider request models = %#v, want %#v", receivedModels, want)
 	}
 
 	if _, err := catalog.Resolve(""); !errors.Is(err, ErrEmptyModelID) {
@@ -129,13 +97,9 @@ func TestModelCatalogResolvesOnlyConfiguredReusableClients(t *testing.T) {
 	}
 }
 
-func TestNewModelCatalogUsesBaseModelWhenAllowlistIsEmpty(t *testing.T) {
-	catalog, err := NewModelCatalog(Config{
-		BaseURL: "https://llm.example/v1",
-		APIKey:  "test-key",
-		Model:   "default-model",
-		Timeout: time.Second,
-	}, nil)
+func TestNewModelCatalogUsesDefaultModelWhenAllowlistIsEmpty(t *testing.T) {
+	factory := &recordingFactory{}
+	catalog, err := NewModelCatalog(factory, "default-model", nil)
 	if err != nil {
 		t.Fatalf("NewModelCatalog() error = %v", err)
 	}
@@ -149,14 +113,54 @@ func TestNewModelCatalogUsesBaseModelWhenAllowlistIsEmpty(t *testing.T) {
 	}
 }
 
-func TestNewModelCatalogRejectsInvalidAllowlist(t *testing.T) {
-	_, err := NewModelCatalog(Config{
-		BaseURL: "https://llm.example/v1",
-		APIKey:  "test-key",
-		Model:   "default-model",
-		Timeout: time.Second,
-	}, []string{"model-a", ""})
-	if !errors.Is(err, ErrEmptyModelID) {
-		t.Fatalf("NewModelCatalog() error = %v, want errors.Is(_, ErrEmptyModelID)", err)
+func TestNewModelCatalogRejectsInvalidInput(t *testing.T) {
+	factory := &recordingFactory{}
+	if _, err := NewModelCatalog(nil, "default-model", nil); err == nil {
+		t.Fatal("NewModelCatalog(nil, ...) error = nil, want factory error")
 	}
+	if _, err := NewModelCatalog(factory, "", nil); !errors.Is(err, ErrEmptyModelID) {
+		t.Fatalf("NewModelCatalog(empty default) error = %v, want errors.Is(_, %v)", err, ErrEmptyModelID)
+	}
+	if _, err := NewModelCatalog(factory, "default-model", []string{"model-a", ""}); !errors.Is(err, ErrEmptyModelID) {
+		t.Fatalf("NewModelCatalog() error = %v, want errors.Is(_, %v)", err, ErrEmptyModelID)
+	}
+}
+
+func TestNewModelCatalogPropagatesFactoryFailure(t *testing.T) {
+	wantErr := errors.New("provider setup failed")
+	_, err := NewModelCatalog(ClientFactoryFunc(func(string) (LLM, error) {
+		return nil, wantErr
+	}), "default-model", nil)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("NewModelCatalog() error = %v, want errors.Is(_, %v)", err, wantErr)
+	}
+}
+
+type recordingFactory struct {
+	clients map[string]*catalogTestLLM
+	models  []string
+}
+
+func (factory *recordingFactory) New(modelID string) (LLM, error) {
+	factory.models = append(factory.models, modelID)
+	if factory.clients == nil {
+		factory.clients = make(map[string]*catalogTestLLM)
+	}
+	client, found := factory.clients[modelID]
+	if !found {
+		client = &catalogTestLLM{modelID: modelID}
+		factory.clients[modelID] = client
+	}
+	return client, nil
+}
+
+type catalogTestLLM struct {
+	modelID string
+}
+
+func (model *catalogTestLLM) Complete(_ context.Context, prompt string) (string, error) {
+	if prompt == "" {
+		return "", fmt.Errorf("prompt must not be empty")
+	}
+	return model.modelID, nil
 }

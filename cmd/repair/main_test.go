@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"codex-hackathon-july2026/internal/llm"
+	"codex-hackathon-july2026/internal/llm/openai"
+	"codex-hackathon-july2026/internal/oracle"
 	"codex-hackathon-july2026/internal/repair"
 )
 
@@ -32,14 +34,29 @@ func SplitCents(total, recipients int) ([]int, error) {
 }
 `}
 
-	final, err := repair.Repair(
+	task := splitCentsTask()
+	resolver, err := oracle.NewResolver(oracle.Config{
+		MaxAttempts:      1,
+		PreflightTimeout: 10 * time.Second,
+		Rulebook:         oracle.DefaultRulebook(),
+		Admitter:         oracle.NewStructuralAdmitter(),
+	})
+	if err != nil {
+		t.Fatalf("NewResolver() error = %v", err)
+	}
+	resolution, err := resolver.Resolve(context.Background(), oracle.Request{Task: task}, oracle.ProgressReporter{})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	final, err := repair.RepairWithConfig(
 		context.Background(),
 		coder,
-		nil,
-		splitCentsTask(),
-		1,
-		10*time.Second,
-		1,
+		repair.CandidateRequest{
+			Spec:      task.Spec,
+			Signature: task.Signature,
+			Bundle:    resolution.Bundle,
+		},
+		repair.Config{MaxAttempts: 1, TestTimeout: 10 * time.Second},
 		repair.ProgressReporter{},
 	)
 	if err != nil {
@@ -55,7 +72,7 @@ func TestConfiguredModelsBuildsSafeRoleDefaults(t *testing.T) {
 	t.Setenv(envModelCoder, "strong-model")
 	t.Setenv(envModelTester, "fast-model")
 
-	settings, err := configuredModels(testLLMConfig())
+	settings, err := configuredModels(testLLMConfig(), testFactory())
 	if err != nil {
 		t.Fatalf("configuredModels() error = %v", err)
 	}
@@ -73,7 +90,7 @@ func TestConfiguredModelsFallsBackAndRejectsMissingRoleDefault(t *testing.T) {
 	t.Setenv(envModelCoder, "")
 	t.Setenv(envModelTester, "")
 
-	settings, err := configuredModels(testLLMConfig())
+	settings, err := configuredModels(testLLMConfig(), testFactory())
 	if err != nil {
 		t.Fatalf("configuredModels() fallback error = %v", err)
 	}
@@ -86,7 +103,7 @@ func TestConfiguredModelsFallsBackAndRejectsMissingRoleDefault(t *testing.T) {
 
 	t.Setenv(envModelCatalog, "default-model")
 	t.Setenv(envModelCoder, "other-model")
-	if _, err := configuredModels(testLLMConfig()); err == nil {
+	if _, err := configuredModels(testLLMConfig(), testFactory()); err == nil {
 		t.Fatal("configuredModels() error = nil, want missing role default error")
 	}
 }
@@ -99,10 +116,22 @@ func TestUniqueModels(t *testing.T) {
 
 func testLLMConfig() llm.Config {
 	return llm.Config{
-		BaseURL: "https://llm.example/v1",
-		APIKey:  "test-key",
-		Model:   "default-model",
-		Timeout: time.Second,
+		Provider: openai.ProviderID,
+		Model:    "default-model",
+		Timeout:  time.Second,
+	}
+}
+
+func testFactory() llm.ClientFactory {
+	return llm.ClientFactoryFunc(func(modelID string) (llm.LLM, error) {
+		return staticLLM{response: modelID}, nil
+	})
+}
+
+func TestConfiguredClientFactoryRejectsUnknownProvider(t *testing.T) {
+	_, err := configuredClientFactory(llm.Config{Provider: "unknown", Model: "model", Timeout: time.Second})
+	if err == nil {
+		t.Fatal("configuredClientFactory() error = nil, want unsupported provider error")
 	}
 }
 

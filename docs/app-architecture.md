@@ -1,30 +1,34 @@
-# Application Architecture
+# Test Verifier — Application Architecture
 
-The settled architecture for **Repair Loop**. Read this before changing the loop, HTTP API, or
-browser flow.
+The settled architecture for **Test Verifier**. Read this before changing the verification
+platform, candidate-repair loop, HTTP API, or browser flow.
 
 ## Purpose and current shape
 
-Repair Loop is a small Go program that makes a blind-oracle repair loop visible:
+Test Verifier is a small Go program that makes a blind-oracle verification platform and its
+bounded candidate-repair loop visible:
 
 ```text
 user spec + pinned signature
         ↓
-blind test-writer → preflight → frozen oracle
-        ↓
-code-writer → Go build/test → feedback → later code-writer attempt
+blind test-writer → source/preflight → frozen VerificationBundle
+                                    ↓
+code-writer → compile/execute bundle → capped feedback → later code-writer attempt
 ```
 
-The browser is the interactive generated-oracle path. The terminal retains an authored
-SplitCents task as a known-good control. Both use the same verifier and repair loop.
+The browser always uses the interactive generated-source path. The manifest records only two
+source origins—`generated` and `authored`. The terminal retains an authored SplitCents task as a
+known-good control. Both sources use the same bundle verifier and repair loop.
 
 The non-negotiable invariants are structural:
 
 1. `prompt.TestPrompt(spec, signature)` has no candidate-code parameter.
 2. `prompt.FirstPrompt` and `prompt.RepairPrompt` have no test-source parameter.
-3. `repair.resolveOracle` completes before the first coder call and freezes one accepted oracle.
-4. The browser cannot submit test source or choose an oracle mode; it submits only task text,
-   signature, and safe model selections. The server constructs `OracleGenerated`.
+3. `oracle.Resolver.Resolve` completes before the first coder call and freezes one accepted
+   bundle.
+4. The browser cannot submit test source or an oracle-mode override. It submits only task text,
+   signature, and safe model selections. The server constructs `OracleGenerated` for every
+   browser run.
 
 ## What a green run means
 
@@ -40,54 +44,110 @@ overstate a generated green result.
 ## Constraints
 
 - **Go stdlib first.** No web framework, npm, CDN, or frontend build chain.
-- **Go is the verifier.** The app runs `go build ./...`, then `go test -timeout <limit> ./...`
-  in a disposable module. `go test -c` preflights a generated oracle without running test
-  bodies.
-- **Trusted-local only.** Model-produced Go is executable local code. A timeout bounds work;
-  this project is not a process sandbox.
+- **Go is the verifier.** The app runs `go build ./...`, compiles with `go test -c`, removes the
+  source-bearing directory, then executes the test binary from a separate directory with a
+  completion sentinel. `go test -c` also preflights an oracle without running test bodies.
+- **Trusted-local only.** Model-produced Go is executable local code. Execution has a source-free
+  cwd, minimal environment, capped output, and a timeout, but this project is not a process
+  sandbox.
 - **In-memory state.** Runs disappear when the process exits.
 - **One live browser run.** The store rejects a second start, even if a caller bypasses the UI.
 
 ## Package direction
 
 ```text
-browser (HTTP only) → server → run → repair
-                                      ├→ prompt
-                                      ├→ llm
-                                      └→ domain
+browser (HTTP only) → server → run
+                              ├→ oracle → {prompt, llm, verification, domain}
+                              └→ repair → {prompt, llm, verification, domain}
+
+cmd/repair → {llm/openai, oracle, repair} → {llm, verification, domain}
 ```
 
-`cmd/repair` is the composition root. It reads configuration, creates the allowed model catalog,
-sets role defaults, injects presets, and wires `server` to `run`. No lower package imports an
-upper package.
+`cmd/repair` is the composition root. It reads configuration, selects the one configured provider
+factory, creates the allowed model catalog, constructs the checked-in Rulebook plus concrete
+oracle resolver and candidate executor, sets role defaults, injects presets, and wires `server`
+to `run`. No lower package imports an upper package.
+
+## Modular composition rule (F24 implemented; F25–F26 planned)
+
+“Plug-and-play” here means explicit, small replacement seams—not a dynamically registered
+pipeline whose ordering is hard to audit. The current component direction is:
+
+```text
+browser → server → run
+                    ├─ oracle → {prompt, llm, verification, domain}
+                    └─ repair → {candidate prompts, verifier}
+                                      ├─ {prompt, llm, domain}
+                                      └─ {verification, domain}
+
+cmd/repair → constructs concrete defaults and injects them downward
+```
+
+`internal/oracle` owns only pre-freeze work: Rulebook-guided source authoring, structural
+preflight, sealing, and resolution evidence. F25 may add bounded review/revision *inside that
+same component*. It returns a frozen bundle and typed evidence; it never sees candidate source,
+imports `repair`/`run`/`server`, or mutates a run record. `internal/verification` remains a
+deterministic sealer/digest validator, not a policy engine. `internal/repair` consumes the
+resolved bundle and owns candidate attempts; it does not know why a particular test rule exists.
+`internal/run` executes the fixed resolver → validated snapshot → executor sequence, maps typed
+component events to phases, and enforces only the generic resolution handoff contract
+(task/digest/origin/evidence consistency), not source-generation policy. `internal/server` remains
+an HTTP adapter.
+
+Use interfaces only at real substitution points: the existing `llm.LLM`, the injected
+`oracle.Resolver` consumed by `run`, the deterministic `oracle.Admitter` used by the resolver,
+the injected `repair.Executor` consumed by `run`, and narrowly scoped test doubles. Keep default
+implementations concrete. There must be no service locator, reflection, dynamic plugin registry,
+generic `[]Step` executor, browser-selected Rulebook, or task-name/spec/signature dispatch.
+
+The data handoff is one-way and inspectable:
+
+```text
+Task → oracle.Resolution{VerificationBundle, Evidence} → ValidateResolution → atomic snapshot
+     → repair.CandidateRequest{Spec, Signature, Bundle} → repair.Executor → candidate attempts → Run snapshot
+```
+
+`VerificationBundle` stays deliberately narrow: exact source, origin, task digest, and bundle
+digest. Generic Rulebook/review provenance belongs in separate resolution evidence, so a future
+change to review policy cannot silently change what a frozen bundle means. A future `internal/draft`
+package may propose a signature before a run, but it has no route to oracle/candidate source and
+does not create verification evidence.
 
 | Package | Responsibility |
 |---|---|
-| `internal/domain` | Dependency-free `Task`, `OracleMode`, `Attempt`, and pinned-signature validation. |
-| `internal/llm` | Stateless OpenAI-compatible completion client and role-agnostic model allowlist/catalog. |
+| `internal/domain` | Dependency-free `Task`, `OracleMode`, `VerificationBundle` manifest/value types, `Attempt`, and pinned-signature validation. |
+| `internal/llm` | SDK-free completion interface, provider-neutral runtime config, safe errors, and role-agnostic model allowlist/catalog. |
+| `internal/llm/openai` | Official OpenAI Go SDK Chat Completions adapter, provider-local endpoint/key validation, timeout/retry policy, and opt-in live smoke test. |
 | `internal/prompt` | Pure prompt construction and conservative code-fence extraction. |
-| `internal/repair` | Oracle resolution/preflight, candidate generation, Go verification, and retry loop. |
-| `internal/run` | Bounded asynchronous runs, snapshots, lifecycle phase, cancellation, and one-live-run guard. |
+| `internal/verification` | Generic immutable-bundle sealing, validation, and canonical task/bundle digests. It never sees candidate code or task-family semantics. |
+| `internal/oracle` | Pre-freeze source resolution: checked-in Rulebook guidance, blind source authoring, structural admission, sealing, and generic resolution evidence. F25 may add bounded review/revision here. |
+| `internal/repair` | `Executor` boundary plus the default candidate generation, source-free Go verification, retry limits, and generic feedback against an already sealed bundle. |
+| `internal/run` | Bounded asynchronous runs, generic resolution-contract validation, snapshots, lifecycle phase, cancellation, and one-live-run guard. |
 | `internal/server` | Strict JSON API plus the embedded vanilla-JS page. |
 
 ## Provider and model configuration
 
 | Variable | Meaning |
 |---|---|
-| `LLM_BASE_URL` | OpenAI-compatible API base URL; the client appends `/chat/completions`. |
-| `LLM_API_KEY` | Provider credential. Never sent to the browser. |
+| `LLM_PROVIDER` | Required provider adapter; currently only `openai` is registered. |
+| `LLM_BASE_URL` | Explicit OpenAI Chat Completions-compatible API base URL; a `/v1` path is retained by the SDK adapter. |
+| `LLM_API_KEY` | Selected-provider credential. Never sent to the browser. |
 | `LLM_MODEL` | Required fallback model. |
 | `LLM_MODELS` | Optional comma-separated browser allowlist. Empty means `LLM_MODEL` plus any explicit role defaults. |
 | `LLM_MODEL_CODER` | Optional default code-writer model; falls back to `LLM_MODEL`. |
 | `LLM_MODEL_TESTER` | Optional default blind test-writer model; falls back to `LLM_MODEL`. |
 | `LLM_TIMEOUT` | Whole-call timeout for one completion. |
 
-`internal/llm.ModelCatalog` is provider-agnostic. It builds one reusable client per configured
-model ID and rejects an empty or unknown selection. It deliberately does not query a provider’s
-model endpoint or hardcode vendor model names. Role separation happens above it in `cmd/repair`.
+`internal/llm.ModelCatalog` is provider-agnostic. It asks an injected `ClientFactory` for one
+reusable client per configured model ID and rejects an empty or unknown selection. It deliberately
+does not query a provider’s model endpoint or hardcode vendor model names. Role separation and
+provider selection happen above it in `cmd/repair`; the browser cannot select a provider.
 
-The model client uses one stateless user-message completion per call. Choosing the same model for
-both roles is legal; choosing different configured IDs can reduce correlated interpretations.
+The OpenAI adapter uses one stateless user-message Chat Completion per call. It uses the SDK's
+single-retry setting under a whole-call context deadline, retains the 1 MiB response bound, and
+normalizes provider errors before they can enter a browser-visible `Run.Error`. Choosing the same
+model for both roles is legal; choosing different configured IDs can reduce correlated
+interpretations.
 
 ## Data model
 
@@ -106,7 +166,19 @@ type Task struct {
     Spec      string
     Signature string
     Oracle    OracleMode
-    TestCode  string // authored input, or generated/frozen before attempt 1
+    TestCode  string // trusted authored input; generated source lives only in the bundle
+}
+
+type VerificationBundle struct {
+    Manifest VerificationManifest
+    TestCode string // exact frozen source; no direct coder-prompt route
+}
+
+type VerificationManifest struct {
+    Version    string
+    Origin     VerificationOrigin
+    TaskDigest string
+    Digest     string
 }
 
 type Attempt struct {
@@ -123,6 +195,8 @@ The browser snapshot persists the complete observed evidence for the life of the
 type Run struct {
     ID, Task, Spec, Signature string
     Oracle                    string
+    Verification              domain.VerificationManifest
+    OracleEvidence            oracle.Evidence
     TestCode                  string
     CoderModel, TesterModel   string
     MaxAttempts               int
@@ -135,37 +209,62 @@ type Run struct {
 }
 ```
 
-Generated runs begin with empty `TestCode` and `CurrentAttempt == 0`. Once preflight accepts the
-test source, `TestCode` is written once to the snapshot, then candidate attempt 1 may begin.
+All browser runs begin with pending source evidence and `CurrentAttempt == 0`. Once preflight
+accepts the bundle, its manifest, source, and generic oracle evidence are written atomically once
+to the snapshot, then candidate attempt 1 may begin. The snapshot copies those value fields so
+later callers cannot alter frozen evidence.
 
-## Repair contract
+## Oracle and repair contracts
+
+`run.Store` receives one injected `oracle.Resolver` and one injected `repair.Executor`. For a
+generated task it gives the resolver only the `Task` and selected blind source author; the resolver
+supplies its static Rulebook to the pure test prompt, structurally admits zero or more source
+candidates, and returns one sealed bundle or `*oracle.OracleFailureError`. For an authored task,
+the resolver instead admits trusted `Task.TestCode` and needs no author. Before publishing any
+result, `run` checks `oracle.ValidateResolution`: bundle digest/task binding, source origin that
+matches task mode, and the appropriate generated-oracle evidence. Its typed writing/preflighting
+callbacks are the only route by which `run` learns source-resolution progress.
 
 ```go
-func Repair(
+func RepairWithConfig(
     ctx context.Context,
-    coder, tester llm.LLM,
-    task domain.Task,
-    maxAttempts int,
-    testTimeout time.Duration,
-    maxOracleAttempts int,
+    coder llm.LLM,
+    request repair.CandidateRequest,
+    config repair.Config, // limits
     report repair.ProgressReporter,
 ) (domain.Attempt, error)
+
+type repair.CandidateRequest struct {
+    Spec      string
+    Signature string
+    Bundle    domain.VerificationBundle
+}
+
+type repair.Executor interface {
+    Execute(context.Context, llm.LLM, repair.CandidateRequest, repair.Config, repair.ProgressReporter) (domain.Attempt, error)
+}
 ```
 
-`ProgressReporter` can receive the one accepted oracle and each completed verification. It lets
-the run store show frozen tests before any candidate lands.
+`RepairWithConfig` first validates the supplied frozen bundle, then reports only completed
+candidate verifications. It has no test-writer, Rulebook, separately supplied test-source, or
+oracle-review parameter. Its sealed bundle necessarily contains the executable source needed by
+the verifier, but default candidate prompts use only `CandidateRequest.Spec`,
+`CandidateRequest.Signature`, and later capped verifier feedback. `repair.DefaultExecutor` is the
+current concrete implementation of `repair.Executor`.
 
-For an authored task, `tester` may be nil and `Task.TestCode` is validated then frozen. For a
-generated task:
+For a generated task, `oracle.DefaultResolver`:
 
 1. Parse the user’s one top-level function signature into a panic-only stub.
-2. Ask `tester` with only `TestPrompt(spec, signature)`.
+2. Ask the selected source author with only `TestPrompt(spec, signature)` plus the checked-in,
+   versioned Rulebook.
 3. Extract only an unambiguous whole-response code fence; otherwise keep the raw model text.
 4. Reject empty/malformed/obviously bypassed test candidates and preflight valid-looking ones
-   with `go test -c` against the stub. The structural gate requires a direct call to the pinned
-   function and a standard testing failure method, but does not prove oracle quality.
-5. Retry rejected oracle candidates only up to `maxOracleAttempts`, before any coder call.
-6. Return `*repair.OracleFailureError` if none is accepted. The run maps this to `oraclefailed`.
+   with `go test -c` against the stub. The structural gate type-resolves the pinned call and
+   testing failure path from the same runnable test (including reachable helpers/subtests), but
+   does not prove oracle quality.
+5. Retry rejected oracle candidates only up to the resolver's configured source-attempt cap,
+   before any coder call.
+6. Return `*oracle.OracleFailureError` if none is accepted. The run maps this to `oraclefailed`.
    A preflight process timeout is infrastructure failure instead of an oracle verdict.
 
 After an oracle is frozen, normal candidate attempts use only `FirstPrompt` or `RepairPrompt`.
@@ -182,7 +281,7 @@ cancel function. It reports these live phases:
 |---|---|
 | `starting` | Snapshot created. |
 | `writingoracle` | Test-writer completion is in flight; candidate attempt is `0`. |
-| `preflightingoracle` | Generated test source is being checked before code exists. |
+| `preflightingoracle` | A generated or authored source bundle is being checked before code exists. |
 | `waitingforprovider` | Code-writer completion is in flight. |
 | `verifying` | Go is building/testing the current candidate. |
 | `canceling` | User cancellation was accepted. |
@@ -215,10 +314,10 @@ The request body for `POST /run` is exactly:
 }
 ```
 
-The browser creates `requestId`; retrying it returns the same run ID and cannot start a second
-run. The server uses `DisallowUnknownFields`, caps body/field size, validates one type-valid
-bodyless function signature, and rejects model IDs outside the catalog. `testCode` and an
-oracle-mode override are therefore impossible request fields. HTTP responses are
+The browser creates a non-empty `requestId`; retrying it returns the same run ID and cannot start
+a second run. The server uses `DisallowUnknownFields`, caps body/field size, validates one
+type-valid bodyless function signature, and rejects model IDs outside the catalog. `testCode`, a
+bundle, and an oracle-mode override are therefore impossible request fields. HTTP responses are
 `Cache-Control: no-store`; terminal cancel or concurrent-start conflicts return `409`.
 
 ## Browser behavior
@@ -228,8 +327,9 @@ verifier data, never HTML insertion. A compact form sits above the existing comp
 
 - Preset buttons populate editable task inputs without starting a run.
 - The active run locks the form and exposes its role models.
-- The oracle panel moves from pending to frozen source before code appears.
-- Candidate / raw feedback / later candidate remain side by side, with selectors for attempts.
+- The verification panel moves from pending to frozen source before code appears and names its
+  origin, manifest version, and digest.
+- Candidate / capped feedback / later candidate remain side by side, with selectors for attempts.
 - Polling is bound to a run ID plus generation, so late responses cannot overwrite another run.
 - The page retains polling after ambiguous transport failure and offers cancellation.
 - Downloaded JSON is the final accepted-evidence snapshot; rejected oracle candidates and raw
@@ -237,6 +337,6 @@ verifier data, never HTML insertion. A compact form sits above the existing comp
 
 ## Deployment
 
-Build a single binary with `go build -o repair ./cmd/repair`. The target host needs Go on `PATH`
-at runtime because verification shells out to `go build`, `go test`, and generated-oracle
-preflight `go test -c`. The embedded UI has no separate deployment step.
+Build a single binary with `go build -o test-verifier ./cmd/repair`. The target host needs Go
+on `PATH` at runtime because verification shells out to `go build` and `go test -c`, then
+executes the compiled test binary. The embedded UI has no separate deployment step.

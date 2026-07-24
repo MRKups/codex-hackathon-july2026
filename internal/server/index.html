@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Repair Loop</title>
+    <title>Test Verifier</title>
     <style>
       :root {
         color-scheme: light;
@@ -507,8 +507,8 @@
     <main>
       <header class="page-header">
         <div>
-          <h1>Repair Loop</h1>
-          <p class="muted">Configure a task, freeze a blind oracle, then inspect how later candidate code responds to exact Go verifier feedback.</p>
+          <h1>Test Verifier</h1>
+          <p class="muted">Configure a task, freeze one verification bundle, then inspect how later candidates respond to capped Go verifier feedback.</p>
         </div>
         <div class="header-actions">
           <button id="downloadButton" type="button" hidden>Download run JSON</button>
@@ -532,7 +532,7 @@
                 </select>
               </label>
               <label for="testerModelSelect">
-                Blind test-writer model
+                Test-writer model
                 <select id="testerModelSelect" name="testerModel" required>
                   <option value="">Loading models…</option>
                 </select>
@@ -555,7 +555,7 @@
 
           <div class="form-actions">
             <p class="helper" id="formHelp">Loading available models and task presets…</p>
-            <button class="primary" id="runButton" type="submit" disabled>Start repair</button>
+            <button class="primary" id="runButton" type="submit" disabled>Start verification</button>
           </div>
         </form>
       </section>
@@ -585,11 +585,11 @@
 
         <article class="panel">
           <div class="panel-header">
-            <h2>Blind oracle</h2>
+            <h2>Frozen verification bundle</h2>
             <span class="label" id="oracleLabel">Pending</span>
           </div>
-          <p class="oracle-note" id="oracleNote">The separate test-writer will see only the specification and signature. Its test source remains pending until the server freezes it before candidate attempt 1.</p>
-          <pre id="oracleCode">Oracle pending — no candidate is allowed to run until an oracle is accepted.</pre>
+          <p class="oracle-note" id="oracleNote">A separate test-writer sees only the specification and signature. The bundle remains pending until it is accepted and frozen before candidate attempt 1.</p>
+          <pre id="oracleCode">Verification bundle pending — no candidate is allowed to run until an oracle is accepted.</pre>
         </article>
       </section>
 
@@ -597,7 +597,7 @@
         <div class="comparison-header">
           <div>
             <h2 id="comparisonTitle">Candidate comparison</h2>
-            <p class="muted">The middle pane is the exact Go feedback from the left candidate. A later candidate is shown under the same frozen oracle.</p>
+            <p class="muted">The middle pane is capped Go feedback from the left candidate. A later candidate is shown under the same frozen oracle.</p>
           </div>
         </div>
 
@@ -737,10 +737,10 @@
               state.setupReady = true;
               runFields.disabled = false;
               runButton.disabled = false;
-              runButton.textContent = "Start repair";
-              formHelp.textContent = "The blind test-writer receives only the spec and signature. The coder never receives oracle source.";
+              runButton.textContent = "Start verification";
+              formHelp.textContent = "A separate test-writer receives only the specification and signature. Coder prompts have no verifier-source parameter.";
               setRunStatus("Ready", "");
-              runSummary.textContent = "Choose a preset or write a task, then start a live repair run.";
+              runSummary.textContent = "Choose a preset or write a task, then start a live verification run.";
               renderDraftContext();
             })
             .catch(function (error) {
@@ -901,7 +901,7 @@
               cancelButton.hidden = false;
               cancelButton.disabled = false;
               setRunStatus("Running", "running");
-              runSummary.textContent = "Run " + id + " is active. The blind oracle is resolved before candidate attempt 1.";
+              runSummary.textContent = "Run " + id + " is active. Its oracle is resolved before candidate attempt 1.";
               pollRun();
             })
             .catch(function (error) {
@@ -1043,7 +1043,7 @@
             return;
           }
           runButton.disabled = !state.setupReady;
-          runButton.textContent = state.run ? "Start another repair" : "Start repair";
+          runButton.textContent = state.run ? "Start another verification" : "Start verification";
         }
 
         function showStartError(error) {
@@ -1096,11 +1096,11 @@
           } else if (run.status === "passed") {
             setRunStatus("Passed", "passed");
             if (isGeneratedOracle(run)) {
-              runSummary.textContent = "The final candidate reached agreement with the frozen blind oracle after Go build and go test. This is not verified correctness.";
+              runSummary.textContent = "The final candidate reached agreement with the frozen blind oracle after build and frozen-bundle execution. This is not verified correctness.";
               notice.textContent = "Green means agreement with the frozen blind oracle, not a proof that the specification is correct.";
             } else {
-              runSummary.textContent = "A candidate passed Go build and go test against the frozen authored oracle.";
-              notice.textContent = "The run finished successfully.";
+              runSummary.textContent = "A candidate passed build and frozen-bundle execution against the frozen authored oracle.";
+              notice.textContent = "The run finished successfully. " + bundleProvenanceSummary(run);
             }
           } else if (run.status === "gaveup") {
             setRunStatus("Gave up", "gaveup");
@@ -1131,11 +1131,13 @@
           specText.textContent = stringValue(run.spec) || "No task specification was recorded.";
           signatureText.textContent = stringValue(run.signature) || "No signature was recorded.";
           if (stringValue(run.testCode)) {
-            var oracleName = isGeneratedOracle(run) ? "Generated oracle" : "Authored oracle";
+            var oracleName = isGeneratedOracle(run) ? "Generated-source bundle" : "Authored-source bundle";
             oracleLabel.textContent = oracleName.toUpperCase() + " • FROZEN";
-            oracleNote.textContent = isGeneratedOracle(run)
-              ? "This test source was written before candidate attempt 1 from the specification and signature only. It is frozen for the run and never sent to the coder."
-              : "This test source is frozen for the run and never sent to the coder.";
+            if (isGeneratedOracle(run)) {
+              oracleNote.textContent = "This test source was written before candidate attempt 1 from the specification and signature only. It passed structural preflight, is frozen for the run, and is not a coder-prompt input. " + bundleProvenanceSummary(run);
+            } else {
+              oracleNote.textContent = "This test source is frozen for the run and is not a coder-prompt input. " + bundleProvenanceSummary(run);
+            }
             oracleCode.textContent = stringValue(run.testCode);
             return;
           }
@@ -1144,7 +1146,7 @@
 
         function renderPendingOracle(run) {
           var generated = !run || isGeneratedOracle(run) || !stringValue(run.oracle);
-          oracleLabel.textContent = generated ? "GENERATED • PENDING" : "AUTHORED • PENDING";
+          oracleLabel.textContent = generated ? "GENERATED • STRUCTURAL • PENDING" : "AUTHORED • PENDING";
           oracleNote.textContent = generated
             ? "The separate test-writer sees only the specification and signature. The oracle remains pending until it is accepted and frozen before candidate attempt 1."
             : "The oracle remains pending until the server accepts and freezes it before candidate attempt 1.";
@@ -1156,12 +1158,14 @@
             return "Writing a blind oracle from the specification and signature only…";
           }
           if (run && run.stage === "preflightingoracle") {
-            return "Preflighting the blind oracle before any candidate is requested…";
+            return isGeneratedOracle(run)
+              ? "Preflighting the blind oracle before any candidate is requested…"
+              : "Preflighting the authored oracle before any candidate is requested…";
           }
           if (run && run.stage === "canceling") {
             return "Cancellation requested while the oracle was still pending.";
           }
-          return "Oracle pending — no candidate is allowed to run until an oracle is accepted.";
+          return "Verification bundle pending — no candidate is allowed to run until an oracle is accepted.";
         }
 
         function renderModelRoles(run) {
@@ -1185,23 +1189,27 @@
             notice.textContent = "Candidate generation is blocked until one oracle is frozen.";
           } else if (run.stage === "preflightingoracle") {
             setRunStatus("Preflighting oracle", "running");
-            runSummary.textContent = "Oracle work (attempt 0): checking the generated test source before any candidate is requested." + timing;
-            notice.textContent = "An oracle fault is not charged to the coder.";
+            runSummary.textContent = (isGeneratedOracle(run)
+              ? "Oracle work (attempt 0): checking the generated test source before any candidate is requested."
+              : "Oracle work (attempt 0): checking the authored test source before any candidate is requested.") + timing;
+            notice.textContent = "A verifier fault is not charged to the coder.";
           } else if (run.stage === "waitingforprovider") {
             setRunStatus("Waiting for coder", "running");
             runSummary.textContent = "Candidate attempt " + displayAttempt(attempt, run) + " of " + limit + ": waiting for the configured coder model." + timing;
-            notice.textContent = "The coder receives the spec, signature, and any earlier verifier output — never oracle source.";
+            notice.textContent = "The coder receives the spec, signature, and capped earlier verifier feedback; its prompt has no oracle-source field.";
           } else if (run.stage === "verifying") {
             setRunStatus("Verifying candidate", "running");
-            runSummary.textContent = "Candidate attempt " + displayAttempt(attempt, run) + " of " + limit + ": Go is building and testing it against the frozen oracle." + timing;
-            notice.textContent = "Candidate source and exact verifier output appear after this verification completes.";
+            runSummary.textContent = "Candidate attempt " + displayAttempt(attempt, run) + " of " + limit + ": Go is compiling and executing the frozen verification bundle." + timing;
+            notice.textContent = "Candidate source and capped verifier feedback appear after this verification completes.";
           } else if (run.stage === "canceling") {
             setRunStatus("Canceling", "canceling");
             runSummary.textContent = "Stop requested. Waiting for the server to finish stopping the current operation." + timing;
             notice.textContent = "No further candidate will be started after cancellation is accepted.";
           } else {
             setRunStatus("Starting", "running");
-            runSummary.textContent = "Run accepted. Preparing the blind oracle before candidate attempt 1." + timing;
+            runSummary.textContent = (isGeneratedOracle(run) || !stringValue(run.oracle))
+              ? "Run accepted. Preparing the blind oracle before candidate attempt 1." + timing
+              : "Run accepted. Preparing the authored oracle before candidate attempt 1." + timing;
             notice.textContent = "Waiting for the server to begin oracle resolution.";
           }
 
@@ -1240,7 +1248,7 @@
 
         function renderEmptyComparison(run) {
           if (run.status === "running" && (run.stage === "writingoracle" || run.stage === "preflightingoracle")) {
-            clearAttemptPane(panes.left, "Candidate source", "Candidate attempts wait for a frozen blind oracle.", "No candidate has been requested.");
+            clearAttemptPane(panes.left, "Candidate source", "Candidate attempts wait for a frozen oracle.", "No candidate has been requested.");
             renderFeedback(null, null);
             clearAttemptPane(panes.right, "Later candidate", "No candidate can exist until oracle work completes.", "No later candidate yet.");
             return;
@@ -1314,9 +1322,9 @@
 
         function passPaneNote(run) {
           if (isGeneratedOracle(run)) {
-            return "This candidate agreed with the frozen blind oracle after Go build and go test; that is not a correctness proof.";
+            return "This candidate agreed with the frozen blind oracle after build and frozen-bundle execution; that is not a correctness proof.";
           }
-          return "This candidate passed both Go verification stages against the frozen authored oracle.";
+          return "This candidate passed build and frozen-bundle execution against the frozen authored oracle. " + bundleProvenanceSummary(run);
         }
 
         function clearAttemptPane(pane, title, note, code) {
@@ -1340,15 +1348,15 @@
           panes.feedback.title.textContent = "Verifier feedback — attempt " + left.n;
           if (left.passed) {
             panes.feedback.state.textContent = "Accepted";
-            panes.feedback.note.textContent = "The run record indicates both Go verification stages passed.";
-            panes.feedback.code.textContent = "go build passed\ngo test passed";
+            panes.feedback.note.textContent = "The run record indicates that build and frozen-bundle execution passed.";
+            panes.feedback.code.textContent = "go build passed\nfrozen verification bundle passed";
             return;
           }
 
           panes.feedback.state.textContent = "Rejected";
           panes.feedback.note.textContent = right && right.n === left.n + 1
-            ? "This exact output was supplied with the earlier source to candidate attempt " + right.n + "."
-            : "The immediate next repair prompt receives this source and exact verifier output.";
+            ? "This recorded feedback was supplied with the earlier source to candidate attempt " + right.n + "."
+            : "The immediate next repair prompt receives this source and capped verifier feedback.";
           panes.feedback.code.textContent = stringValue(left.output) || "No verifier output was recorded.";
         }
 
@@ -1441,6 +1449,29 @@
           return stringValue(run && run.oracle).toLowerCase() === "generated";
         }
 
+        function verificationManifest(run) {
+          var manifest = run && run.verification;
+          return manifest && typeof manifest === "object" ? manifest : {};
+        }
+
+        function bundleProvenanceSummary(run) {
+          var manifest = verificationManifest(run);
+          var pieces = [];
+          var origin = stringValue(manifest.origin);
+          var taskDigest = stringValue(manifest.taskDigest);
+          var digest = stringValue(manifest.digest);
+          if (origin) {
+            pieces.push("Source origin " + origin + ".");
+          }
+          if (taskDigest) {
+            pieces.push("Task digest " + taskDigest.slice(0, 12) + "…");
+          }
+          if (digest) {
+            pieces.push("Bundle digest " + digest.slice(0, 12) + "…");
+          }
+          return pieces.join(" ");
+        }
+
         function runTiming(run) {
           var started = Date.parse(stringValue(run.startedAt));
           var deadline = Date.parse(stringValue(run.deadlineAt));
@@ -1474,7 +1505,7 @@
           var url = URL.createObjectURL(blob);
           var link = document.createElement("a");
           link.href = url;
-          link.download = "repair-loop-run.json";
+          link.download = "test-verifier-run.json";
           document.body.append(link);
           link.click();
           link.remove();

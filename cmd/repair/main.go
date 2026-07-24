@@ -1,4 +1,4 @@
-// Command repair runs the authored terminal control or the interactive generated-oracle browser demo.
+// Command repair runs the Test Verifier authored terminal control or browser application.
 package main
 
 import (
@@ -12,6 +12,8 @@ import (
 
 	"codex-hackathon-july2026/internal/domain"
 	"codex-hackathon-july2026/internal/llm"
+	"codex-hackathon-july2026/internal/llm/openai"
+	"codex-hackathon-july2026/internal/oracle"
 	"codex-hackathon-july2026/internal/repair"
 	"codex-hackathon-july2026/internal/run"
 	"codex-hackathon-july2026/internal/server"
@@ -33,9 +35,9 @@ func main() {
 	flag.StringVar(&address, "addr", "127.0.0.1:8080", "address for the browser demo server")
 	flag.IntVar(&maxAttempts, "attempts", 3, "maximum number of coder attempts")
 	flag.IntVar(&oracleAttempts, "oracle-attempts", 2, "maximum generated-oracle attempts before oraclefailed")
-	flag.DurationVar(&runTimeout, "run-timeout", 150*time.Second, "maximum duration of one browser repair run")
+	flag.DurationVar(&runTimeout, "run-timeout", 150*time.Second, "maximum duration of one browser verification run")
 	flag.BoolVar(&serve, "serve", false, "serve the browser demo instead of running once in the terminal")
-	flag.DurationVar(&verifierTimeout, "verifier-timeout", 10*time.Second, "timeout for one candidate verification")
+	flag.DurationVar(&verifierTimeout, "verifier-timeout", 10*time.Second, "timeout for one oracle preflight or candidate verification")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		fmt.Fprintf(os.Stderr, "usage: %s [-serve] [-addr ADDRESS] [-attempts N] [-oracle-attempts N] [-run-timeout DURATION] [-verifier-timeout DURATION]\n", os.Args[0])
@@ -56,17 +58,31 @@ func main() {
 	if strings.TrimSpace(address) == "" {
 		exitFailure("configuration error", fmt.Errorf("server address must not be empty"))
 	}
+	resolver, err := oracle.NewResolver(oracle.Config{
+		MaxAttempts:      oracleAttempts,
+		PreflightTimeout: verifierTimeout,
+		Rulebook:         oracle.DefaultRulebook(),
+		Admitter:         oracle.NewStructuralAdmitter(),
+	})
+	if err != nil {
+		exitFailure("configuration error", err)
+	}
+	executor := repair.NewExecutor()
 
 	config, err := llm.ConfigFromEnv()
 	if err != nil {
 		exitFailure("configuration error", err)
 	}
-	models, err := configuredModels(config)
+	factory, err := configuredClientFactory(config)
+	if err != nil {
+		exitFailure("configuration error", err)
+	}
+	models, err := configuredModels(config, factory)
 	if err != nil {
 		exitFailure("configuration error", err)
 	}
 	if serve {
-		serveBrowser(address, models, maxAttempts, oracleAttempts, verifierTimeout, runTimeout)
+		serveBrowser(address, models, resolver, executor, maxAttempts, verifierTimeout, runTimeout)
 		return
 	}
 	coder, err := models.catalog.Resolve(models.coder)
@@ -74,14 +90,24 @@ func main() {
 		exitFailure("configuration error", err)
 	}
 
-	final, err := repair.Repair(
+	task := splitCentsTask()
+	resolution, err := resolver.Resolve(context.Background(), oracle.Request{Task: task}, oracle.ProgressReporter{})
+	if err != nil {
+		exitFailure("oracle or verifier infrastructure failure", err)
+	}
+
+	final, err := executor.Execute(
 		context.Background(),
 		coder,
-		nil,
-		splitCentsTask(),
-		maxAttempts,
-		verifierTimeout,
-		oracleAttempts,
+		repair.CandidateRequest{
+			Spec:      task.Spec,
+			Signature: task.Signature,
+			Bundle:    resolution.Bundle,
+		},
+		repair.Config{
+			MaxAttempts: maxAttempts,
+			TestTimeout: verifierTimeout,
+		},
 		repair.ProgressReporter{AttemptFinished: printAttempt},
 	)
 	if err != nil {
@@ -95,13 +121,12 @@ func main() {
 	fmt.Printf("gave up after %d attempt(s)\n", final.N)
 }
 
-func serveBrowser(address string, models modelSettings, maxAttempts, oracleAttempts int, verifierTimeout, runTimeout time.Duration) {
+func serveBrowser(address string, models modelSettings, resolver oracle.Resolver, executor repair.Executor, maxAttempts int, verifierTimeout, runTimeout time.Duration) {
 	store, err := run.NewStore(run.Config{
-		MaxAttempts:    maxAttempts,
-		OracleAttempts: oracleAttempts,
-		TestTimeout:    verifierTimeout,
-		RunTimeout:     runTimeout,
-	})
+		MaxAttempts: maxAttempts,
+		TestTimeout: verifierTimeout,
+		RunTimeout:  runTimeout,
+	}, resolver, executor)
 	if err != nil {
 		exitFailure("configuration error", err)
 	}
@@ -118,7 +143,7 @@ func serveBrowser(address string, models modelSettings, maxAttempts, oracleAttem
 		exitFailure("server configuration error", err)
 	}
 
-	fmt.Printf("Repair Loop browser demo: http://%s\n", address)
+	fmt.Printf("Test Verifier browser application: http://%s\n", address)
 	if err := http.ListenAndServe(address, handler); err != nil {
 		exitFailure("browser server failure", err)
 	}
@@ -130,7 +155,24 @@ type modelSettings struct {
 	tester  string
 }
 
-func configuredModels(config llm.Config) (modelSettings, error) {
+func configuredClientFactory(config llm.Config) (llm.ClientFactory, error) {
+	switch config.Provider {
+	case openai.ProviderID:
+		providerConfig, err := openai.ConfigFromEnv(config.Timeout)
+		if err != nil {
+			return nil, fmt.Errorf("configure %s provider: %w", openai.ProviderID, err)
+		}
+		factory, err := openai.NewFactory(providerConfig)
+		if err != nil {
+			return nil, fmt.Errorf("create %s provider factory: %w", openai.ProviderID, err)
+		}
+		return factory, nil
+	default:
+		return nil, fmt.Errorf("unsupported %s %q", llm.EnvProvider, config.Provider)
+	}
+}
+
+func configuredModels(config llm.Config, factory llm.ClientFactory) (modelSettings, error) {
 	coder := configuredModel(envModelCoder, config.Model)
 	tester := configuredModel(envModelTester, config.Model)
 	modelIDs, err := llm.ParseModelIDs(os.Getenv(envModelCatalog))
@@ -143,7 +185,7 @@ func configuredModels(config llm.Config) (modelSettings, error) {
 		return modelSettings{}, fmt.Errorf("%s must include the configured coder and test-writer defaults", envModelCatalog)
 	}
 
-	catalog, err := llm.NewModelCatalog(config, modelIDs)
+	catalog, err := llm.NewModelCatalog(factory, config.Model, modelIDs)
 	if err != nil {
 		return modelSettings{}, err
 	}

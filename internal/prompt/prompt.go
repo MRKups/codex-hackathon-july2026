@@ -5,7 +5,7 @@ import "strings"
 
 const sourceFileRequirements = "Return only one complete Go source file. The file must declare `package solution`, implement the required signature exactly, use only the Go standard library, and contain no tests, `main` program, Markdown fences, or explanation.\n"
 
-const testFileRequirements = "Return only one complete Go test source file. The file must declare `package solution`, import and use the standard-library `testing` package, define table-driven `func Test...` functions for the required signature, use only the Go standard library, and contain no implementation, `main` program, Markdown fences, or explanation.\n"
+const testFileRequirements = "Return only one complete Go test source file. The file must declare `package solution`, import and use the standard-library `testing` package, define runnable `func Test...` functions for the required signature, and make each checked case reach both the required function and a real `testing.T` failure assertion (directly or through a called helper/subtest). Do not hide checks in uncalled helpers or constant-false branches. Use table-driven or deterministic generated cases where appropriate. If generating many cases, use a fixed seed so failures are reproducible. Use only the Go standard library and contain no implementation, `main` program, Markdown fences, or explanation.\n"
 
 // FirstPrompt asks a coder to produce the first candidate for a task.
 // Its primitive inputs deliberately leave no route for oracle source to enter the prompt.

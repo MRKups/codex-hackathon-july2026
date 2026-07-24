@@ -39,19 +39,19 @@ func ParseModelIDs(value string) ([]string, error) {
 	return normalizeModelIDs(strings.Split(value, ","))
 }
 
-// NewModelCatalog constructs one reusable Client per allowlisted model. Each client inherits
-// the provider base URL, API key, and timeout from base, while its model is set to the matching
-// allowlisted ID. If modelIDs is empty, base.Model is the catalog's sole allowed model.
-func NewModelCatalog(base Config, modelIDs []string) (*ModelCatalog, error) {
-	base.BaseURL = strings.TrimSpace(base.BaseURL)
-	base.APIKey = strings.TrimSpace(base.APIKey)
-	base.Model = strings.TrimSpace(base.Model)
-	if err := base.Validate(); err != nil {
-		return nil, fmt.Errorf("validate model catalog base config: %w", err)
+// NewModelCatalog constructs one reusable LLM per allowlisted model through factory. If
+// modelIDs is empty, defaultModel is the catalog's sole allowed model.
+func NewModelCatalog(factory ClientFactory, defaultModel string, modelIDs []string) (*ModelCatalog, error) {
+	if factory == nil {
+		return nil, errors.New("model client factory is required")
 	}
 
+	defaultModel = strings.TrimSpace(defaultModel)
+	if defaultModel == "" {
+		return nil, ErrEmptyModelID
+	}
 	if len(modelIDs) == 0 {
-		modelIDs = []string{base.Model}
+		modelIDs = []string{defaultModel}
 	}
 
 	ids, err := normalizeModelIDs(modelIDs)
@@ -64,12 +64,12 @@ func NewModelCatalog(base Config, modelIDs []string) (*ModelCatalog, error) {
 		clients: make(map[string]LLM, len(ids)),
 	}
 	for _, id := range ids {
-		config := base
-		config.Model = id
-
-		client, err := NewClient(config)
+		client, err := factory.New(id)
 		if err != nil {
 			return nil, fmt.Errorf("create client for configured model: %w", err)
+		}
+		if client == nil {
+			return nil, fmt.Errorf("create client for configured model %q: factory returned nil", id)
 		}
 
 		catalog.options = append(catalog.options, ModelOption{ID: id})

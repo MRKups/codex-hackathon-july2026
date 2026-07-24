@@ -1,172 +1,235 @@
-# Repair Loop
+# Test Verifier
 
-Repair Loop is a small, stdlib-first Go prototype for a visible
-**specify → generate → verify → repair** workflow.
+Test Verifier is a small, stdlib-first Go verification platform for model-produced code. It makes
+one bounded workflow visible and reproducible:
 
-In the browser path, you write a specification and a pinned Go function signature. A blind
-test-writer context creates `solution_test.go` from those two inputs only; the app compiles that
-oracle against a stub and freezes it before a separate code-writer context creates any candidate.
-Go then builds and tests each candidate. Failed compiler or test output becomes the next coder
-prompt, while the oracle itself never moves.
+```text
+specification + pinned Go signature
+        ↓
+resolve, preflight, and freeze one verification bundle
+        ↓
+candidate code → compiled Go verifier → capped feedback → later candidate
+```
 
-The page is deliberately plain HTML, CSS, and browser JavaScript—no framework, npm, CDN, or
-frontend build step. It makes the actual evidence visible: submitted spec, frozen test source,
-selected role models, candidate code, raw Go feedback, and later attempts.
+The product is the frozen verification evidence, not the repair loop by itself. A repair loop is
+still useful: a later candidate can use Go feedback to converge on the same fixed verifier. It
+must never change that verifier to make a failure disappear.
 
-## What a result means
+Test Verifier is a trusted-local prototype. It is suitable for inspecting model behaviour and
+verification evidence during development; it is not a sandbox for hostile code or a proof system.
 
-| Mode | Green means |
-|---|---|
-| Browser generated oracle | A candidate—possibly repaired using Go feedback—satisfied an oracle generated blind to every candidate. This is not a proof of correctness. |
-| Terminal authored control | The candidate passed a fixed human-authored oracle. This is stronger evidence of correctness. |
+## How verification works
 
-The browser never accepts test source from a user submission. The test writer never receives
-candidate code, and the code writer never receives test source—only the output of Go running it.
+Every run begins by producing one immutable `VerificationBundle` before candidate code exists.
+The bundle contains:
+
+- the exact Go test source used for every candidate attempt;
+- a manifest with schema version, source origin, task digest, and bundle digest.
+
+The task digest binds the bundle to the submitted specification and signature. The bundle digest
+binds the complete manifest and executable source. The browser shows both, and downloaded run JSON
+keeps the accepted evidence snapshot.
+
+For a generated run, the dedicated `oracle` component gives the blind source author a checked-in,
+versioned Rulebook. It directs the author toward generic validity, boundary, error, mutation,
+determinism, round-trip, and metamorphic checks, and away from guessed non-trivial answer keys.
+The Rulebook is prompt guidance, not executable verifier logic or a task-specific profile. Its
+version/digest is recorded separately from the bundle, so it cannot silently change what frozen
+test source means.
+
+There are two legal oracle origins:
+
+| Delivery path | Source origin | How it is created | What a green result means |
+|---|---|---|---|
+| Free-form browser task | `generated` | A blind test-writer sees only the task-specific specification and signature plus the checked-in universal Rulebook, then its source passes structural preflight. | The candidate satisfied a blind generated oracle. This is agreement, not verified correctness. |
+| Terminal control | `authored` | A human-owned test source is preflighted and frozen. | The candidate passed that fixed authored oracle; confidence depends on the quality of the authored tests. |
+
+The browser cannot submit test source, expected values, reference logic, or an executable rule
+language. Its interactive path is always generated-oracle mode. Authored source enters only
+through trusted local code, such as the terminal control.
+
+## Runtime boundary
+
+Generated and authored test source is preflighted against a signature-derived stub before code is
+requested. The structural gate requires a runnable test with a type-resolved call to the pinned
+function and a reachable `testing.T` failure path. It rejects obvious bypasses such as
+`TestMain`, `init`, skipped tests, direct `os.Exit`, build constraints, and `go:embed`.
+This admission gate does not prove that generated tests express the right behaviour.
+
+For each candidate, Test Verifier:
+
+1. builds a disposable module;
+2. compiles its tests to a standalone test binary;
+3. removes the source-bearing directory;
+4. runs that binary from a separate directory with only `PATH` and a private `TMPDIR`;
+5. requires a verifier-owned completion sentinel after the tests finish; and
+6. caps verifier feedback at 128 KiB before it can enter a later candidate prompt.
+
+This blocks ordinary source-file leaks and early-success exits from crossing the repair boundary.
+Coder prompts have no test-source parameter, and ordinary runtime source reads are blocked. This
+is deliberately **not** a confidentiality boundary or OS sandbox: deliberately hostile code can
+still interact with the host or emit arbitrary text into verifier output. Do not expose it to
+untrusted public code.
+
+## Architecture
+
+```text
+browser ──→ server ──→ run ──┬─→ oracle ──→ prompt + llm + verification + domain
+                              └─→ repair ──→ prompt + llm + verification + domain
+
+cmd/repair ──→ llm/openai + concrete oracle resolver + concrete candidate executor
+```
+
+`cmd/repair` is the composition root. It reads configuration, constructs the configured LLM
+adapter and model allowlist, constructs the fixed Rulebook, oracle resolver, and candidate
+executor, and wires the HTTP server to the in-memory run store. The run store performs the
+explicit resolver → validated frozen snapshot → candidate-executor sequence. Lower packages never
+import HTTP or browser code.
+
+The browser sends only a task name, specification, pinned signature, and two locally configured
+model IDs. The server always creates a generated-oracle task. The test-writer receives no
+candidate code. The code-writer receives no test-source parameter—only capped feedback from the
+frozen verifier after a failed attempt.
 
 ## Prerequisites
 
-- Go 1.26 or newer, with `go` on your `PATH`.
-- An OpenAI-compatible Chat Completions provider, network access, and credentials for a live run.
+- Go 1.26 or newer, with `go` on `PATH`. Go must remain on `PATH` at runtime because the verifier
+  compiles and executes disposable Go modules.
+- An OpenAI Chat Completions-compatible endpoint, network access, and credentials for a live run.
 - A modern browser for the visual demo.
-- Bash or Zsh for the shown `source .env` commands. In POSIX `sh`, use `. ./.env` instead.
+- Bash or Zsh for the shown `source .env` commands. In POSIX `sh`, use `. ./.env`.
 
-There are no third-party Go dependencies and no Node/npm tooling to install.
+The only direct third-party dependency is the pinned official
+[`openai-go/v3`](https://github.com/openai/openai-go) SDK. There is no Node/npm tooling.
 
-Generated candidates and generated oracles are compiled locally. This is a trusted-local
-hackathon tool, not a sandbox for untrusted public input.
+## Configure a provider
 
-## Set up the provider
-
-Copy the tracked template once, fill in your provider values, then load them into the shell:
+Copy the tracked template once, populate it with your own values, then load it:
 
 ```bash
 [ -f .env ] || cp .env.example .env
-# Edit .env, then load it:
+# Edit .env, then:
 source .env
 ```
 
-Required settings are `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, and `LLM_TIMEOUT`.
-`LLM_BASE_URL` may include a version path such as `/v1`; the client appends
-`/chat/completions`. Keep `.env` private: it is ignored by Git and must never be committed.
-Use HTTPS for every non-local provider.
+The current composition root registers one provider adapter:
 
-The browser’s model dropdowns are local configuration, not a provider model-discovery API:
+| Variable | Required | Meaning |
+|---|---:|---|
+| `LLM_PROVIDER` | Yes | Set to `openai`. |
+| `LLM_BASE_URL` | Yes | OpenAI Chat Completions-compatible base URL; a path such as `/v1` is allowed. |
+| `LLM_API_KEY` | Yes | Credential for that endpoint. |
+| `LLM_MODEL` | Yes | Fallback model ID. |
+| `LLM_TIMEOUT` | Yes | Go duration for one completion, including the adapter’s retry policy. |
+| `LLM_MODELS` | No | Comma-separated browser model allowlist. |
+| `LLM_MODEL_CODER` | No | Default candidate-code model; falls back to `LLM_MODEL`. |
+| `LLM_MODEL_TESTER` | No | Default blind test-writer model; falls back to `LLM_MODEL`. |
 
-```bash
-# One option for both roles:
-export LLM_MODEL="your-provider-model"
+If `LLM_MODELS` is blank, the browser offers `LLM_MODEL` plus explicit role defaults. If it is
+set, it must include both effective defaults. The browser cannot discover provider models or
+choose another provider; all options use the configured endpoint and credential. Different role
+models can reduce correlated readings of an ambiguous specification, but they do not establish
+correctness.
 
-# Or offer a safe list and choose defaults for each role:
-export LLM_MODELS="fast-model,strong-model"
-export LLM_MODEL_CODER="strong-model"
-export LLM_MODEL_TESTER="fast-model"
-```
+The verification platform adds no environment variables.
 
-If `LLM_MODELS` is blank, the app offers `LLM_MODEL` plus any explicitly configured role defaults.
-If it is set, it must contain the effective coder and test-writer defaults. Every option uses the
-same configured provider endpoint and credential. Selecting the same model for both roles is
-legal; choosing different models can reduce correlated interpretations of a spec.
+Keep `.env` private. It is ignored by Git and must never be committed. Use HTTPS for non-local
+providers.
 
-## Build and verify
+## Build and check the project
 
 These commands do not contact a provider:
 
 ```bash
 go build ./...
-go test ./...
+go test -count=1 ./...
 go vet ./...
 ```
 
-Optional development checks:
+Useful development checks:
 
 ```bash
 go test -race ./...
 go test -cover ./...
-gofmt -l $(rg --files -g '*.go')
+go mod verify
+gofmt -l $(find . -name '*.go' -not -path './_archive/*')
 ```
 
-To build a named executable:
+To make a product-named local executable while retaining the stable command directory:
 
 ```bash
-go build -o repair ./cmd/repair
-./repair -h
+go build -o test-verifier ./cmd/repair
+./test-verifier -h
 ```
 
-## Run the browser demo
+## Run the browser application
 
-Start the local server:
+Load configuration and start the local server:
 
 ```bash
 source .env
-go run ./cmd/repair -serve -attempts 3 -oracle-attempts 2 -verifier-timeout 10s -run-timeout 2m30s
+go run ./cmd/repair -serve \
+  -attempts 3 \
+  -oracle-attempts 2 \
+  -verifier-timeout 10s \
+  -run-timeout 2m30s
 ```
 
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080). Use `-addr 127.0.0.1:8090` for another
-local address. Press `Ctrl-C` in the terminal to stop the server.
+local address. Press `Ctrl-C` to stop the server.
 
-To use the app:
+To use it:
 
-1. Click a preset to fill the form, or write your own specification.
-2. Enter one bodyless Go function signature, such as
-   `func Normalize(input string) (string, error)`.
-3. Choose a code-writer and blind test-writer from the configured dropdowns.
-4. Click **Start repair**.
-5. Watch the page write and preflight the oracle before candidate attempt 1, then inspect the
-   frozen tests, code attempts, and exact Go feedback.
-6. After a terminal state, click **Download run JSON** to keep the final evidence snapshot.
+1. Click a preset or enter a task name, specification, and one bodyless Go function signature.
+2. Choose locally configured code-writer and test-writer models.
+3. Click **Start verification**.
+4. Inspect the pending oracle stage, then the frozen source, manifest, digest, candidate
+   attempts, and capped feedback.
+5. Download the final run JSON when the run reaches a terminal state.
 
-The server permits one live run at a time. Browser starts use a local idempotency token, so a lost
-start response is retried as the same request instead of creating a second run. The page shows whether it is writing/preflighting the
-oracle, waiting for the coder, or verifying Go code, and it offers **Cancel run**. The limits are
-independent: `LLM_TIMEOUT` bounds one completion, `-verifier-timeout` bounds one candidate
-verification, `-oracle-attempts` bounds generated-oracle retries before any candidate exists,
-and `-run-timeout` bounds the entire browser run. A cancellation, timeout, or `oraclefailed`
-state is not a verdict on candidate code.
+Only one browser run may be live at a time. Browser runs are in memory and disappear when the
+server restarts. A browser-generated idempotency token makes a lost start response safe to retry.
+The limits have separate jobs:
 
-## Notes for judges
+| Limit | Scope |
+|---|---|
+| `LLM_TIMEOUT` | One provider completion. |
+| `-verifier-timeout` | One oracle compile preflight or the full candidate verification sequence: build, test-binary compile, and binary execution. |
+| `-oracle-attempts` | Generated-oracle source attempts before `oraclefailed`; authored-source failures are configuration/infrastructure failures. |
+| `-attempts` | Candidate attempts after the bundle is frozen. |
+| `-run-timeout` | The whole browser run. |
 
-The top of a completed browser run establishes what happened in order: the submitted spec and
-signature, the two selected model roles, and the test source independently generated and frozen
-before candidate code existed. The code writer never receives that source.
-
-Each candidate pane is the exact extracted source written to `solution.go`. The feedback pane is
-the raw output from `go build` or `go test` that informed the next repair prompt. A later
-candidate is checked against the same frozen oracle. A generated-oracle green state means a
-candidate satisfied an oracle generated blind to every candidate; later candidates may have used
-Go feedback to converge on it. The UI intentionally does not call this verification.
-
-`Download run JSON` records the accepted evidence: input, selected models, frozen oracle,
-completed attempts, verifier output, timestamps, and terminal state. It is a final snapshot, not
-an event log of rejected oracle candidates or provider wrapper replies. A live model may pass on its first try; that is shown honestly.
-For a repeatable repair trace, save a genuinely observed multi-attempt run rather than inventing
-an initial failure.
+A cancellation, timeout, `oraclefailed`, or infrastructure failure is not a verdict that a
+candidate implementation is wrong.
 
 ## Run the authored terminal control
 
-The terminal command keeps the original fixed SplitCents task and human-authored oracle. It is a
-quick provider check and a control path separate from the browser’s generated oracle:
+The terminal command uses the fixed SplitCents task and human-authored oracle. It is a quick
+provider/verification smoke path separate from the browser’s free-form workflow:
 
 ```bash
 source .env
 go run ./cmd/repair -attempts 3 -verifier-timeout 10s
 ```
 
-It prints each verified attempt and ends as `passed`, `gave up`, or an infrastructure failure.
+It prints each completed candidate verification and ends as `passed`, `gave up`, or an
+infrastructure failure.
 
-## Optional live provider smoke check
+## Optional live provider smoke test
 
-This explicit integration test sends one short completion request (with at most one retry) and
-does not print a response or secrets:
+This explicit integration test sends one short completion request, allows the adapter’s one retry,
+and does not print provider responses or secrets:
 
 ```bash
 source .env
-LLM_LIVE_TEST=run go test -tags=integration ./internal/llm -run '^TestLiveCompletion$' -count=1 -v
+LLM_LIVE_TEST=run go test -tags=integration ./internal/llm/openai \
+  -run '^TestLiveCompletion$' -count=1 -v
 ```
 
-## Documentation
+## More detail
 
-- [Design](docs/go-repair-loop.md)
-- [Architecture](docs/app-architecture.md)
-- [Blind-oracle design change](docs/design-change-2026-07-18.md)
-- [Project tracker](docs/tracker.md)
+- [System design](docs/go-repair-loop.md)
+- [Application architecture](docs/app-architecture.md)
+- [Historical blind-oracle design change](docs/design-change-2026-07-18.md)
+- [Implementation tracker](docs/tracker.md)
 - [Repository layout](docs/file-structure.md)

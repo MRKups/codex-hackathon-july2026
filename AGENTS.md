@@ -1,6 +1,7 @@
 # Agent House Rules & Non-Negotiables
 
-Guardrails for the **Repair Loop** project — a Go generate → test → repair loop.
+Guardrails for the **Test Verifier** project — a Go verification platform with a bounded
+candidate-repair loop.
 This file is read automatically by Codex. It is the guardrail; implementation detail
 lives in code. **If a principle here is violated, the work must be rewritten.**
 
@@ -15,12 +16,20 @@ Keep this file short. A bloated rules file gets partially ignored.
 
 - **The oracle is written blind to the code. This is the point of the project.** The tests
   that judge a solution must be produced by something that has never seen that solution.
-  Two legal sources: **authored** (a human writes them) or **generated** (a separate
-  test-writer context reads only the spec + signature). Both are fixed *before* the repair
-  loop starts and frozen for the whole run. Illegal, always: one context producing both code
+  Two legal sources: **authored** (a human-owned test source supplied by trusted local code) or
+  **generated** (a separate test-writer context reads only the task-specific spec + signature,
+  plus the checked-in universal Rulebook).
+  Both are fixed *before* the repair loop starts and frozen for the whole run. Illegal, always:
+  one context producing both code
   and tests; a test-writer that sees candidate code; regenerating the oracle mid-run to make
   a failing solution pass. If any of those happen the guarantee is void and the work must be
   redone.
+  A browser request must never supply verifier source, expected values, reference logic, or an
+  executable rule language. The generic platform records provenance and digests, but does not
+  turn natural-language rules into executable evidence.
+  The verifier executes a compiled test binary only after removing its source-bearing directory
+  and uses a minimal runtime environment. This protects the ordinary source boundary; it is not
+  an OS sandbox for hostile local code.
 
 - **Build the end-to-end blind-oracle loop first.** The task spec is the shared input; in
   generated mode, disagreement can expose different readings of it. That is a useful
@@ -28,10 +37,17 @@ Keep this file short. A bloated rules file gets partially ignored.
   its frozen oracle; inspect the task after the run, without making research analysis a
   prerequisite for a working demo.
 
-- **Respect the dependency direction.** `browser → server → run → repair → { prompt, llm }`,
-  with `task` feeding `run`. No package imports "upward" and no import cycles. Each
-  package has one job (see `docs/app-architecture.md`). If you need something from an
-  upper layer, the design is wrong — stop and flag it.
+- **Respect the dependency direction.** `browser → server → run → { oracle, repair }`, with
+  `oracle` and `repair` depending only downward on `prompt`, `llm`, `verification`, and `domain`,
+  and with `task` feeding `run`. No package imports "upward" and no import cycles. Each package
+  has one job (see `docs/app-architecture.md`). If you need something from an upper layer, the
+  design is wrong — stop and flag it.
+
+- **Use explicit seams, not magic orchestration.** Components exchange small typed inputs and
+  outputs and are wired manually at `cmd/repair`; no service locator, reflection, dynamic plugin
+  registry, task-text routing, or hidden global default. Define an interface only at a real
+  replacement boundary, keep default implementations concrete, and never let a lower component
+  mutate `run.Store` or reach into another component's internals.
 
 - **Errors are values.** Expected failures travel on the return (`(T, error)`) and must be
   handled. `panic` is only for genuinely impossible states ("this can't happen"), never for

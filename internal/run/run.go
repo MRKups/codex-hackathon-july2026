@@ -11,6 +11,7 @@ import (
 
 	"codex-hackathon-july2026/internal/domain"
 	"codex-hackathon-july2026/internal/llm"
+	"codex-hackathon-july2026/internal/oracle"
 	"codex-hackathon-july2026/internal/repair"
 )
 
@@ -48,10 +49,9 @@ var ErrRunActive = errors.New("a repair run is already active")
 
 // Config holds injected execution limits for every run in a Store.
 type Config struct {
-	MaxAttempts    int
-	OracleAttempts int
-	TestTimeout    time.Duration
-	RunTimeout     time.Duration
+	MaxAttempts int
+	TestTimeout time.Duration
+	RunTimeout  time.Duration
 }
 
 // Roles is the per-run pair of independently selected model clients. Tester is required only
@@ -66,28 +66,32 @@ type Roles struct {
 // Run is the JSON snapshot consumed by the browser. TestCode is the accepted frozen oracle
 // shown to the viewer; Repair never passes it to the coder prompt builders.
 type Run struct {
-	ID             string           `json:"id"`
-	Task           string           `json:"task"`
-	Spec           string           `json:"spec"`
-	Signature      string           `json:"signature"`
-	Oracle         string           `json:"oracle"`
-	TestCode       string           `json:"testCode"`
-	CoderModel     string           `json:"coderModel"`
-	TesterModel    string           `json:"testerModel"`
-	MaxAttempts    int              `json:"maxAttempts"`
-	Status         Status           `json:"status"`
-	Stage          Phase            `json:"stage"`
-	CurrentAttempt int              `json:"currentAttempt"`
-	StartedAt      time.Time        `json:"startedAt"`
-	DeadlineAt     time.Time        `json:"deadlineAt"`
-	FailureMode    string           `json:"failureMode"`
-	Error          string           `json:"error"`
-	Attempts       []domain.Attempt `json:"attempts"`
+	ID             string                      `json:"id"`
+	Task           string                      `json:"task"`
+	Spec           string                      `json:"spec"`
+	Signature      string                      `json:"signature"`
+	Oracle         string                      `json:"oracle"`
+	Verification   domain.VerificationManifest `json:"verification"`
+	OracleEvidence oracle.Evidence             `json:"oracleEvidence"`
+	TestCode       string                      `json:"testCode"`
+	CoderModel     string                      `json:"coderModel"`
+	TesterModel    string                      `json:"testerModel"`
+	MaxAttempts    int                         `json:"maxAttempts"`
+	Status         Status                      `json:"status"`
+	Stage          Phase                       `json:"stage"`
+	CurrentAttempt int                         `json:"currentAttempt"`
+	StartedAt      time.Time                   `json:"startedAt"`
+	DeadlineAt     time.Time                   `json:"deadlineAt"`
+	FailureMode    string                      `json:"failureMode"`
+	Error          string                      `json:"error"`
+	Attempts       []domain.Attempt            `json:"attempts"`
 }
 
 // Store starts repair loops and retains their snapshots for the lifetime of the process.
 type Store struct {
-	config Config
+	config   Config
+	resolver oracle.Resolver
+	executor repair.Executor
 
 	mu          sync.RWMutex
 	nextID      uint64
@@ -96,13 +100,12 @@ type Store struct {
 	activeRunID string
 }
 
-// NewStore constructs an in-memory store with caller-selected execution limits.
-func NewStore(config Config) (*Store, error) {
+// NewStore constructs an in-memory store with caller-selected execution limits, an explicit
+// pre-freeze resolver, and a candidate-side executor. Both components are injected at the
+// composition root rather than discovered by name, task text, or global configuration.
+func NewStore(config Config, resolver oracle.Resolver, executor repair.Executor) (*Store, error) {
 	if config.MaxAttempts <= 0 {
 		return nil, errors.New("max attempts must be greater than zero")
-	}
-	if config.OracleAttempts <= 0 {
-		return nil, errors.New("oracle attempts must be greater than zero")
 	}
 	if config.TestTimeout <= 0 {
 		return nil, errors.New("verifier timeout must be greater than zero")
@@ -110,11 +113,19 @@ func NewStore(config Config) (*Store, error) {
 	if config.RunTimeout <= 0 {
 		return nil, errors.New("run timeout must be greater than zero")
 	}
+	if resolver == nil {
+		return nil, errors.New("oracle resolver is required")
+	}
+	if executor == nil {
+		return nil, errors.New("repair executor is required")
+	}
 
 	return &Store{
-		config:  config,
-		runs:    make(map[string]*Run),
-		cancels: make(map[string]context.CancelFunc),
+		config:   config,
+		resolver: resolver,
+		executor: executor,
+		runs:     make(map[string]*Run),
+		cancels:  make(map[string]context.CancelFunc),
 	}, nil
 }
 
@@ -140,20 +151,20 @@ func (store *Store) StartRun(task domain.Task, roles Roles) (string, error) {
 	ctx, cancel := context.WithDeadline(context.Background(), deadlineAt)
 	store.nextID++
 	id := fmt.Sprintf("run_%06d", store.nextID)
-	currentAttempt := 1
-	if mode == domain.OracleGenerated {
-		currentAttempt = 0
-	}
+	// No candidate exists until a bundle is resolved and candidate generation begins, regardless
+	// of whether the source is authored or generated.
+	currentAttempt := 0
+	// Every oracle source enters the snapshot through one oracle Resolution only, after preflight
+	// and sealing. This keeps authored and generated evidence equally atomic.
 	testCode := ""
-	if mode == domain.OracleAuthored {
-		testCode = task.TestCode
-	}
 	store.runs[id] = &Run{
 		ID:             id,
 		Task:           task.Name,
 		Spec:           task.Spec,
 		Signature:      task.Signature,
 		Oracle:         string(mode),
+		Verification:   domain.VerificationManifest{},
+		OracleEvidence: oracle.Evidence{},
 		TestCode:       testCode,
 		CoderModel:     roles.CoderModel,
 		TesterModel:    roles.TesterModel,
@@ -220,6 +231,7 @@ func (store *Store) GetRun(id string) (Run, bool) {
 	}
 
 	snapshot := *stored
+	snapshot.Verification = (domain.VerificationBundle{Manifest: stored.Verification}).Clone().Manifest
 	snapshot.Attempts = make([]domain.Attempt, len(stored.Attempts))
 	copy(snapshot.Attempts, stored.Attempts)
 	return snapshot, true
@@ -254,30 +266,53 @@ func (store *Store) CancelRun(id string) (found, canceled bool) {
 
 func (store *Store) execute(ctx context.Context, cancel context.CancelFunc, id string, task domain.Task, roles Roles) {
 	defer cancel()
-
-	var tester llm.LLM
-	if roles.Tester != nil {
-		tester = progressTester{tester: roles.Tester, store: store, id: id}
-	}
-	final, err := repair.Repair(
-		ctx,
-		progressCoder{coder: roles.Coder, store: store, id: id},
-		tester,
-		task,
-		store.config.MaxAttempts,
-		store.config.TestTimeout,
-		store.config.OracleAttempts,
-		repair.ProgressReporter{
-			OracleResolved: func(testCode string) error {
-				store.setOracle(id, testCode)
-				return nil
-			},
-			AttemptFinished: func(attempt domain.Attempt) error {
-				store.appendAttempt(id, attempt)
-				return nil
-			},
+	resolution, err := store.resolver.Resolve(ctx, oracle.Request{
+		Task:   task,
+		Author: roles.Tester,
+	}, oracle.ProgressReporter{
+		WritingSource: func() {
+			store.setPhase(id, PhaseWritingOracle)
 		},
-	)
+		PreflightingSource: func() {
+			store.setPhase(id, PhasePreflightingOracle)
+		},
+	})
+
+	var final domain.Attempt
+	if err == nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			err = contextErr
+		} else if resolutionErr := oracle.ValidateResolution(task, resolution); resolutionErr != nil {
+			err = fmt.Errorf("validate oracle resolution: %w", resolutionErr)
+		} else if !store.setResolution(ctx, id, resolution) {
+			if contextErr := ctx.Err(); contextErr != nil {
+				err = contextErr
+			} else {
+				err = errors.New("run stopped before oracle resolution could be published")
+			}
+		}
+	}
+	if err == nil {
+		final, err = store.executor.Execute(
+			ctx,
+			progressCoder{coder: roles.Coder, store: store, id: id},
+			repair.CandidateRequest{
+				Spec:      task.Spec,
+				Signature: task.Signature,
+				Bundle:    resolution.Bundle,
+			},
+			repair.Config{
+				MaxAttempts: store.config.MaxAttempts,
+				TestTimeout: store.config.TestTimeout,
+			},
+			repair.ProgressReporter{
+				AttemptFinished: func(attempt domain.Attempt) error {
+					store.appendAttempt(id, attempt)
+					return nil
+				},
+			},
+		)
+	}
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -301,7 +336,7 @@ func (store *Store) execute(ctx context.Context, cancel context.CancelFunc, id s
 		stored.Error = fmt.Sprintf("run timed out after %s", store.config.RunTimeout)
 		return
 	}
-	var oracleFailure *repair.OracleFailureError
+	var oracleFailure *oracle.OracleFailureError
 	if errors.As(err, &oracleFailure) {
 		stored.Status = StatusOracleFailed
 		stored.Error = oracleFailure.Error()
@@ -336,15 +371,22 @@ func (store *Store) setPhase(id string, phase Phase) {
 	}
 }
 
-func (store *Store) setOracle(id, testCode string) {
+func (store *Store) setResolution(ctx context.Context, id string, resolution oracle.Resolution) bool {
+	if err := ctx.Err(); err != nil {
+		return false
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
 	stored, found := store.runs[id]
-	if !found || stored.Status != StatusRunning || stored.Stage == PhaseCanceling {
-		return
+	if ctx.Err() != nil || !found || stored.Status != StatusRunning || stored.Stage == PhaseCanceling {
+		return false
 	}
-	stored.TestCode = testCode
+	bundle := resolution.Bundle.Clone()
+	stored.TestCode = bundle.TestCode
+	stored.Verification = bundle.Manifest
+	stored.OracleEvidence = resolution.Evidence
+	return true
 }
 
 func (store *Store) appendAttempt(id string, attempt domain.Attempt) {
@@ -356,21 +398,6 @@ func (store *Store) appendAttempt(id string, attempt domain.Attempt) {
 		return
 	}
 	stored.Attempts = append(stored.Attempts, attempt)
-}
-
-type progressTester struct {
-	id     string
-	store  *Store
-	tester llm.LLM
-}
-
-func (tester progressTester) Complete(ctx context.Context, prompt string) (string, error) {
-	tester.store.setPhase(tester.id, PhaseWritingOracle)
-	text, err := tester.tester.Complete(ctx, prompt)
-	if err == nil {
-		tester.store.setPhase(tester.id, PhasePreflightingOracle)
-	}
-	return text, err
 }
 
 type progressCoder struct {

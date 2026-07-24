@@ -8,10 +8,17 @@ F17, and the useful browser-input part of F12 are complete. F18 remains optional
 `docs/app-architecture.md`, `docs/file-structure.md`, `docs/tracker.md`.
 **New tracker items:** F15, F16, F17, F18, C4, C5. **Amended:** F3, F4, F6, F7, F9, F12, F13, C1, C3.
 
+**Later correction (2026-07-21):** Experimental domain-specific verification code was archived.
+The active platform freezes a generic `VerificationBundle`: exact source plus a manifest containing
+only version, origin, task digest, and bundle digest. There remain exactly two oracle origins,
+authored and generated. The current product name is **Test Verifier**; this historical document
+retains “repair loop” where it describes the mechanism or the earlier project language. For the
+current contract, follow `docs/go-repair-loop.md` and `docs/app-architecture.md`.
+
 This document explains *why* the project's central rule changed and the research-inspired
 question the completed flow can later help explore. It does not turn the hackathon into a
-separate research platform. Read it before changing generated-mode work. If this document
-and an older comment in the code disagree, this document wins.
+separate research platform. Read it before changing generated-mode work, but the current system
+design and application architecture win if this historical record conflicts with them.
 
 ---
 

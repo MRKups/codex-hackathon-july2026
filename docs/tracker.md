@@ -1,11 +1,36 @@
-# Repair Loop — Implementation Tracker
+# Test Verifier — Implementation Tracker
 
-*Identifier counter: the next new items are **F19, C6, B2**.
+*Identifier counter: the next new items are **F27, C7, B4**.
 Branch strategy: `main` (active development and production during the hackathon).*
+
+> **Product-language decision, 2026-07-24.** The product is named **Test Verifier**. “Verifier
+> loop” names the bounded candidate → verifier-feedback → later-candidate mechanism, while
+> `cmd/repair`, package paths, module name, and legacy document filenames remain stable. The public
+> README, current design/architecture headings, browser title, binary example, and user-facing run
+> language must lead with Test Verifier rather than implying that repair is the product.
+
+> **Corrective design decision, 2026-07-21.** The first MinCoins profile was an invalid product
+> shortcut: an exact browser-text match silently chose task-specific semantic code. The active
+> platform must not recognize a problem family, ship a hidden profile route, or carry speculative
+> profile plumbing merely because one regression needs stronger semantics. It returns to two
+> generic delivery paths only: authored source from a trusted caller and blind generated source
+> from the test-writer. No task-profile registry is implied. A future Oracle Rulebook may guide
+> every generated run, but it must be universal, non-executable policy—not a task selector,
+> expected-value store, or reference implementation. Preserve superseded work under `_archive/`;
+> it is not part of the active build or runtime.
+
+> **Modular composition decision, 2026-07-21.** The platform evolves through explicit typed
+> components, manually wired at `cmd/repair`, rather than a dynamic pipeline or hidden registry.
+> `oracle` owns pre-freeze source generation/preflight and will own its future review pass;
+> `verification` owns only immutable bundle sealing/digests; `repair` owns candidate generation and execution against an already
+> frozen bundle; `run` will own lifecycle/snapshots; and `server` will adapt HTTP/UI to those
+> components. A component may report typed events to its caller but may not reach into `run`,
+> `server`, or another component's mutable state. See F24–F26.
 
 > **Design change, 2026-07-18 (after F1/C3, before F2).** The oracle is no longer
 > human-authored-only. It is now written *blind to the code* in one of two modes: `authored`
-> (human) or `generated` (a separate test-writer LLM context reading only spec + signature).
+> (human) or `generated` (a separate test-writer LLM context reading only task-specific spec +
+> signature plus the checked-in universal Rulebook).
 > `generated` is now the interactive browser showcase; `authored` remains the terminal control
 > condition. New work identifiers: **F15–F18, C4, C5**. Amended: **F3, F4, F6, C1**. Phase 0
 > stayed `authored`-only on purpose — prove the coder loop against a known-good fixture before
@@ -39,11 +64,13 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   The tracked `.env.example` and ignored local `.env` document the required provider variables
   plus optional model allowlist and role defaults. The configured-provider smoke test is opt-in:
   `LLM_LIVE_TEST=run go test -tags=integration
-  ./internal/llm -run '^TestLiveCompletion$' -count=1 -v`. It requires HTTPS, is excluded
+  ./internal/llm/openai -run '^TestLiveCompletion$' -count=1 -v`. It requires HTTPS, is excluded
   from ordinary test runs, and must pass before F1 is marked done.
   Live verification passed on 2026-07-18: the opt-in HTTPS probe returned non-empty text.
   An initial HTTP 401 was traced to and resolved by correcting the local API key; no secret is
   tracked. The completed C3 contract below unblocks F2.
+  *Superseded transport note (2026-07-20): F19 archives this handwritten protocol client and
+  replaces it with a pinned official SDK adapter while retaining the same repair-loop boundary.*
 
 - [x] **F2 — Prompt + extraction.** `internal/prompt` (pure, no I/O):
   `FirstPrompt(spec, signature)`, `RepairPrompt(spec, signature, previousCode, verifierOutput)`,
@@ -69,6 +96,9 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   ./...`, `go test ./...`, `go test -race ./...`, `go test -cover ./...` (79.5% for
   `internal/repair`), `go vet ./...`, and `git diff --check` passed. No live provider call was
   required.
+  *Superseded execution note (2026-07-20): F21 retains the build stage but compiles a test binary,
+  removes the source-bearing directory, and executes it from a separate minimal-environment
+  directory with a completion sentinel and capped feedback.*
 
 - [x] **F4 — Repair loop + one hardcoded task.** `internal/repair` `Repair(...)` wiring
   `llm.LLM` + `domain.Task` through generate → verify → feedback → retry, plus
@@ -89,10 +119,9 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
 ### Phase 1 — Blind test-writer and interactive path
 
 - [x] **F15 — Generated oracle (the design change).** `domain.OracleMode` + `Task.Oracle`,
-  pure `prompt.TestPrompt(spec, signature)`, and `repair.resolveOracle` now resolve and freeze
-  the generated test source before attempt 1. `Repair` takes explicit coder + tester `llm.LLM`
-  values and reports one accepted oracle to the run store before it asks the coder. Authored mode
-  remains a supported control and permits a nil tester.
+  pure `prompt.TestPrompt(spec, signature)`, and the then-combined repair resolver first resolved
+  and froze generated test source before attempt 1. F24 later moves that responsibility into
+  `internal/oracle`; authored mode remains a supported control and permits a nil source author.
   Depends on: F4.
   Structural checks prove tester → frozen oracle → coder ordering, no test source in coder
   prompts, no candidate source in tester prompts, and no regeneration after acceptance.
@@ -100,7 +129,8 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
 - [x] **F16 — Oracle preflight + fault attribution.** Generated tests are parsed and compiled
   with `go test -c` against a parsed signature-derived stub before any coder call; the test
   binary is never run. A rejected candidate oracle retries only up to the injected
-  `-oracle-attempts` cap. Exhaustion returns typed `OracleFailureError`, which becomes terminal
+  `-oracle-attempts` cap. Exhaustion returns typed `oracle.OracleFailureError` (moved there by
+  F24), which becomes terminal
   `oraclefailed`, never a candidate attempt. Preflight also rejects source without a runnable
   `Test` function, a direct call to the pinned function, or a testing failure method, as well as
   build constraints, `TestMain`, `init`, test skips, and direct `os.Exit`; it type-checks the
@@ -119,10 +149,183 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   `go test -cover ./...`, `go vet ./...`, `gofmt`, inline-JavaScript syntax, the no-HTML-
   injection static check, and `git diff --check` passed. No live provider request was made.
 
+- [x] **F19 — Provider boundary + official OpenAI Go SDK.** Preserve `llm.LLM` as the sole
+  repair-loop contract: `Complete(context.Context, string) (string, error)`. Make
+  `ModelCatalog` depend only on a small SDK-free `ClientFactory` that creates one reusable
+  `LLM` for a configured model ID. Put the first concrete adapter and all OpenAI SDK types in
+  `internal/llm/openai`; only `cmd/repair` selects the injected `LLM_PROVIDER` factory. This
+  first step supports one active provider per process, while the browser continues to receive
+  only opaque local model IDs. Do not add provider selection to the browser, generic
+  chat/message types, role-aware provider APIs, or provider imports to `prompt`, `repair`,
+  `run`, or `server`.
+
+  Replace the handwritten OpenAI-compatible client with the pinned official dependency
+  `github.com/openai/openai-go/v3 v3.44.0`. This is the explicit AGENTS.md third-party
+  dependency exception: the official typed SDK replaces handwritten provider protocol code and
+  is sealed behind the existing narrow boundary; it is not a framework, ORM, or general-purpose
+  abstraction library. Its direct/transitive dependencies must be recorded by `go.mod`/
+  `go.sum`, and no additional provider dependency is added in this item. Archive the superseded
+  raw client and its obsolete protocol tests under `_archive/`; do not delete them.
+
+  The initial OpenAI adapter uses the SDK's **Chat Completions** surface to preserve the current
+  `/chat/completions` behavior and configured compatible base URLs. A move to Responses is a
+  separate behavior change: it must prove endpoint support, make response storage an explicit
+  `false` policy, reject incomplete/non-text results, and never use conversation or previous-
+  response state. Each completion remains a stateless, independent request even when the SDK
+  transport/client is shared by the two roles.
+
+  Preserve the current safety contract: one explicit retry owner (SDK max retries `1`, never an
+  outer retry as well), a context-derived whole-call timeout, cancellation identity, non-empty
+  output validation, and normalized errors that expose a safe status/category but never a
+  provider response body or credential through `Run.Error`. Retain the current 1 MiB response
+  bound or deliberately replace it with a documented, tested output-size policy before removing
+  it. Pass the configured key/base URL explicitly rather than relying on ambient SDK defaults.
+  Update `.env.example`, README, architecture, file structure, live smoke test, and C2 as part
+  of the migration. Adapter tests use an injected HTTP client/factory and cover request shape,
+  retry count, timeout/cancellation, output extraction, redaction, and catalog reuse; the
+  paid HTTPS smoke test remains opt-in.
+  Depends on: F17.
+  Verification (2026-07-20): the SDK-free catalog and server use fake factories; the OpenAI
+  adapter tests cover configured request shape, ambient SDK-env isolation, one retry, timeout,
+  cancellation, invalid output, 1 MiB response bounds, base-URL credential rejection, and
+  secret-bearing error redaction.
+  `go mod verify`, `go build ./...`, `go test ./...`, `go test -race ./...`,
+  `go test -cover ./...`, `go vet ./...`, `gofmt`, and `git diff --check` passed. The explicit
+  HTTPS live smoke test was not run, so no provider request was made.
+
+- [x] **F20 — Superseded rulebook experiment (archived).** A temporary third delivery path
+  explored server-selected semantic code. It was not a safe general platform boundary and was
+  removed from the active system by F23. Its source is retained under `_archive/` only; it is not
+  built, registered, selectable, or described as a product capability.
+
+- [x] **F21 — VerificationBundle baseline.** Retain the useful generic result of that work: a
+  frozen bundle contains exact executable test source plus a schema version, one legal source
+  origin (`authored` or `generated`), a task digest, and a bundle digest. The oracle resolver
+  freezes it before candidate generation; every candidate executes the same source through the generic
+  compiled-binary verifier. F23 deliberately removed the registry, task-family metadata, and
+  any browser inference from this baseline.
+
+  The verifier also structurally admits source against the pinned signature, compiles a test
+  binary, removes its source-bearing directory, executes from a separate minimal-environment
+  directory, requires a verifier-owned completion sentinel, and caps feedback before it reaches
+  a coder prompt. This reduces ordinary source leakage and exit-zero bypasses; it is not an OS
+  sandbox for hostile local code.
+
+- [x] **F22 — Test Verifier documentation and product language.** Make the README the accurate
+  entry point for the frozen-verification platform: explain the two authored/generated delivery
+  paths, bundle freeze/digest/provenance, the bounded candidate-repair mechanism, confidence
+  limits, trusted-local execution boundary, and current setup/run commands. Rename current
+  public documentation headings and browser-facing labels to **Test Verifier**, while retaining
+  `repair` only where it names the underlying package, command, or candidate-repair loop. The
+  label was updated from Frozen Oracle on 2026-07-24; lower-case “frozen oracle” remains a
+  technical description of a blind verifier fixed before candidate generation.
+  Correct any claim that capped verifier feedback is “exact” or that runtime execution is direct
+  `go test`. Do not rename the Go module, package paths, command directory, or historical design
+  records in this scoped item.
+  Verification: reviewed again as part of F23 against the current browser/runtime contract.
+
+- [x] **F23 — Remove the MinCoins profile spike.** Removed every active MinCoins-specific path:
+  the profile package, registration, exact browser-preset selection, profile tests, challenge
+  fixture, profile metadata/plan/check fields, and profile-specific UI/docs. Removed the generic
+  profile registry/plumbing too: without a trusted task-manifest path it was speculative
+  scaffolding, not a reusable platform feature. Retain the task-agnostic
+  `VerificationBundle`—exact source, one of the two legal origins, task/bundle digests—and the
+  generic preflight, freeze, source-free compiled-binary verifier, run snapshot, and
+  authored/generated repair paths. Archive superseded MinCoins work under `_archive/` rather
+  than deleting it. The browser must construct only a generated oracle from submitted text; it
+  may not infer semantic verification from a task name, signature, or matching prose.
+
+  Depends on: F21.
+  Verification (2026-07-21): an active-source audit found no task-family routing, profile
+  registry, profile metadata, or MinCoins code outside `_archive/`; `taskForRunRequest` always
+  constructs `OracleGenerated`, and lifecycle/API tests prove a valid browser run calls the test
+  writer before candidate generation. `gofmt`, `go build ./...`, `go test -count=1 ./...`,
+  `go test -race ./...`, `go vet ./...`, `go mod verify`, embedded-JavaScript syntax, and
+  `git diff --check` passed. No provider request was made.
+
+- [x] **F24 — Oracle component boundary and universal Rulebook v1.** Moved generated/authored
+  source resolution, signature-derived stub construction, structural admission, source-attempt
+  cap, and typed `oracle.OracleFailureError` out of `repair` into `internal/oracle`. `run.Store`
+  now receives an explicit `oracle.Resolver`, resolves `Task → Resolution{Bundle, Evidence}`
+  before candidate work, validates that its sealed bundle and origin match the submitted task,
+  atomically snapshots its frozen bundle/evidence, and then calls the injected candidate-side
+  `repair.Executor` (whose default delegates to `repair.RepairWithConfig`) with a narrow
+  candidate request: spec, signature, and sealed bundle only. `repair` has no source-author,
+  separately supplied raw test source, Rulebook, or review input; its sealed bundle retains the
+  executable test source required by the generic verifier.
+
+  `oracle.DefaultResolver` is manually constructed at `cmd/repair` with a checked-in generic
+  Rulebook and concrete structural `Admitter`. The Rulebook has version
+  `oracle-rulebook/v1` and a canonical digest; it is attached to every generated source-author
+  prompt and recorded separately as generic run evidence. It guides only spec/signature-derived
+  validity, boundary/error, mutation, determinism, round-trip, and metamorphic checks, and tells
+  the source author to avoid guessed non-trivial answer keys and unsupported optimality claims. It is not
+  executable code, browser input, a task profile, matcher, reference implementation, or DSL.
+
+  The new seams are `oracle.Resolver`, its deterministic `oracle.Admitter`, and the candidate
+  `repair.Executor`; defaults are concrete and injected manually. There is no DI framework, service locator, generic `[]Step`
+  pipeline, reflection, plugin registry, browser-selected policy, or task-name/spec/signature
+  dispatch. `oracle` cannot see candidate code or mutate `run.Store`; `run` maps typed oracle
+  progress to lifecycle phases; `VerificationBundle` remains source/origin/task-digest/bundle-
+  digest only.
+
+  Depends on: F15, F16, F21, F23.
+  Verification (2026-07-24): structural-admission and resolver tests cover blind source prompts,
+  stale-source rejection, retries, typed failure, authored resolution, Rulebook digest stability,
+  separation from bundle digest, and resolution provenance. Candidate tests prove frozen-bundle
+  validation/reuse and no oracle material in coder prompts. Run tests cover the injected
+  resolver/executor handoff, no candidate work before resolution, malformed-resolution rejection
+  before snapshot/candidate work, and a late resolver result after the deadline. `gofmt -l`,
+  `go build ./...`, `go test -count=1 ./...`, `go test -race ./...`, `go vet ./...`,
+  `go mod verify`, `git diff --check`, and the active task-routing audit passed. No provider
+  request was made.
+
+- [ ] **F25 — Bounded generic oracle review pipeline v1.** Build on F24 with one explicit,
+  bounded pre-freeze sequence: oracle author → structural preflight → oracle reviewer → at most
+  one author revision → structural preflight → freeze. The reviewer sees only spec, pinned
+  signature, Rulebook, and proposed test source; it never sees candidate code. The candidate
+  author sees none of the oracle source or review material.
+
+  Reviewer output is untrusted, strict, size-bounded data: `accept`, `revise`, or `reject`, plus
+  generic finding categories (answer-key provenance, boundary/error coverage, validity/invariant
+  coverage, unsupported semantic claim) and short findings. Invalid reviewer output is a bounded
+  oracle-resolution failure, never silently interpreted. Record Rulebook version/digest, actual
+  author/reviewer model IDs, counts, final verdict, and finding summaries as generic run evidence
+  separate from the immutable bundle manifest. The UI may say “structurally admitted” or
+  “reviewed generated oracle”; it must never say correct or proven.
+
+  Configure one reviewer model ID at the composition root, with a visible recorded fallback to the
+  author model when no separate ID is configured. Do not add a browser provider picker, committee
+  voting, multiple-suite merging, task-specific reviewers, generated reference solvers, or a
+  generic verification DSL in this item.
+
+  Depends on: F24, F17.
+  Verification: fake author/reviewer tests cover accept, revise, reject, invalid review data,
+  cap exhaustion, cancellation, no candidate leakage to either oracle role, no oracle leakage to
+  the candidate author, exactly one final bundle, and truthful run phases/evidence.
+
+- [ ] **F26 — Human-confirmed Go signature drafting aid.** Add a separate task-authoring action,
+  not a run or oracle mode: an allowlisted model receives only the current specification and
+  proposes one bodyless top-level Go function signature. A pure prompt plus strict source/size
+  handling and `domain.ValidateSignature` gate the suggestion. `POST /signature-draft` returns a
+  draft only; the browser displays it as syntax-valid but semantically unverified, requires an
+  explicit user “Use draft” action, and never starts a run or overwrites a changed specification.
+
+  Reuse the selected oracle-author model initially; do not add a third browser role, provider
+  behavior, task profile, or signature DSL. The final user-confirmed signature remains the normal
+  shared input that is digested and frozen before oracle resolution.
+
+  Depends on: F24.
+  Verification: prompt isolation, malformed/oversized completion rejection, strict endpoint/model
+  validation, no run/oracle/candidate side effect, stale-browser-response protection, explicit
+  user application, and unchanged authoritative `POST /run` signature validation.
+
 - [ ] **F18 — Failure mode signal.** On `gaveup`, intersect failing test names across attempts
-  and record `persistent` (a possible interpretation mismatch worth inspecting) or `varied`
-  (ordinary difficulty). Surface it on the `Run` as an optional diagnostic after the dual-mode
-  flow works; it is not a blocker for the hackathon demo.
+  and record `persistent` (the same frozen assertion kept failing) or `varied` (ordinary
+  difficulty). Do not interpret `persistent` as a specification mismatch: an internally
+  inconsistent generated oracle is a counterexample.
+  Surface it on the `Run` as an optional diagnostic after the dual-mode flow works; it is not a
+  blocker for the hackathon demo.
   Depends on: F15, F7.
 
 - [ ] **F5 — Tune repair prompts on real tasks.** Feed previous code + test output cleanly;
@@ -134,8 +337,8 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
 - [ ] **F6 — Task loading.** `internal/task`: load and return `domain.Task` values from `tasks/`
   (each subdir = one task). `spec.md` is required and pins the signature; `solution_test.go` is
   **optional** and its presence selects the mode — present → `OracleAuthored`, absent →
-  `OracleGenerated`. Auto-discovered, no registration. Never write a generated oracle back into
-  `tasks/`.
+  `OracleGenerated`. Do not infer executable verification from prose or browser input, and never
+  write a generated oracle back into `tasks/`. Keep this loader small and data-only.
   Depends on: F4.
 
 ### Phase 2 — State (the bridge)
@@ -144,8 +347,9 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   goroutines and returns stable IDs immediately. Its synchronous progress reporter records the
   accepted frozen oracle and appends `domain.Attempt` values under a mutex; `GetRun` returns a
   copied snapshot. State is an in-memory `map[string]*Run` for the lifetime of the process. The
-  JSON record includes the submitted spec/signature, oracle, selected `coderModel`/
-  `testerModel`, attempt budget, lifecycle fields, and result.
+  JSON record includes the submitted spec/signature, oracle, frozen verification-bundle manifest
+  (version, origin, task digest, bundle digest), separate generic oracle evidence, selected
+  `coderModel`/`testerModel`, attempt budget, lifecycle fields, and result.
   Depends on: F4.
   A browser run owns a bounded context and private cancel function. Generated runs move through
   `writingoracle` and `preflightingoracle` with `currentAttempt: 0`, then candidate provider
@@ -161,8 +365,8 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
 - [x] **F8 — HTTP layer.** `internal/server` + `cmd/repair -serve` use Go 1.22+ `net/http`
   routing. `GET /setup` returns safe model IDs, role defaults, and editable presets. `POST /run`
   accepts a strict JSON spec/signature/role-selection request plus a browser-generated
-  idempotency token and starts a server-constructed generated-oracle task. Retrying the same
-  token returns the original run ID rather than creating another run. `POST /run/{id}/cancel`
+  idempotency token and always starts a server-constructed generated-oracle task. Retrying the same token returns the original
+  run ID rather than creating another run. `POST /run/{id}/cancel`
   accepts a live cancellation; `GET /run/{id}`
   returns the live `Run` snapshot. Unknown IDs return `404`; a second live start or terminal
   cancel returns `409`. JSON responses are `Cache-Control: no-store`.
@@ -180,9 +384,9 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   `internal/server/assets.go`, is plain HTML/CSS/vanilla JS—no framework, CDN, npm, or build
   step. Its compact form accepts an optional name, required spec/signature, and separate allowed
   code-writer/test-writer models; preset buttons only populate those editable fields. It locks
-  the form while a run is active, then shows role metadata, pending → frozen oracle source, and
-  a comparison-first candidate/feedback/later-candidate layout. Attempt selectors and full JSON
-  download preserve the observed record.
+  the form while a run is active, then shows role metadata, pending → frozen oracle source, its
+  verification-bundle origin/digests, and a comparison-first candidate/feedback/later-candidate layout.
+  Attempt selectors and full JSON download preserve the observed record.
   Depends on: F8.
   It names oracle writing/preflight, coder wait, Go verification, cancellation, timeout, and
   oracle failure truthfully. A generated green state says a candidate satisfied a frozen blind
@@ -196,17 +400,18 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
 - [ ] **F10 — Attempt diffs.** Highlight what changed between consecutive attempts.
 - [ ] **F11 — SSE streaming.** Push attempts the instant they land instead of polling.
 - [x] **F12 — Task input in UI.** The browser lets a user type a spec and required pinned signature rather
-  than picking a file. The immediate generated-mode path accepts neither client test source nor
-  a client-selected oracle mode: the server constructs `OracleGenerated`, resolves it before any
-  candidate exists, then freezes it. A compact preset list fills those same editable fields and
-  never auto-runs. The UI exposes separate allowed test-writer and code-writer model selections;
-  provider-specific IDs come from configured allowlist data, never hardcoded browser values.
+  than picking a file. It accepts neither client test source nor a client-selected oracle mode:
+  the server constructs `OracleGenerated` for every browser submission; it resolves and freezes
+  before any candidate exists. A compact preset list fills those same editable fields and never auto-runs. The UI
+  exposes separate allowed test-writer and code-writer model selections; provider-specific IDs
+  come from configured allowlist data, never hardcoded browser values.
   Server-side length/type/model validation, idempotent start recovery, and one-live-run
   protection are implemented.
-- [ ] **F13 — Property-test check.** Offer property/metamorphic tests as the oracle instead of
-  example tests — a stronger check and the more novel angle. Especially valuable in `generated`
-  mode: properties are harder to satisfy by special-casing than examples, which narrows the gap
-  between "passed the oracle" and "met the spec."
+- [ ] **F13 — Broader verification guidance.** Do not add a generic verifier language or task
+  family registry. If a future trusted authored task needs property or metamorphic checks, keep
+  them in its human-owned Go source and first show a second concrete use case. Properties can
+  narrow the gap between "passed the oracle" and "met the spec," but an optimality claim still
+  needs a trusted reference, a bounded exhaustive check, a lower-bound proof, or a certificate.
 - [ ] **F14 — SQLite persistence.** `modernc.org/sqlite` (zero-CGO) so runs survive a restart.
 
 ## Concerns (C)
@@ -216,8 +421,8 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   structural rather than procedural:
   1. No coder prompt builder may accept test source. `FirstPrompt`/`RepairPrompt` take spec,
      signature, previous code, verifier output — nothing else.
-  2. `TestPrompt` may not accept candidate code, and `resolveOracle` runs before any coder call
-     exists to produce some. The ordering is the guarantee.
+  2. `TestPrompt` may not accept candidate code, and `oracle.Resolver.Resolve` runs before any
+     coder call exists to produce some. The ordering is the guarantee.
   3. The oracle is frozen once per run. Nothing may regenerate it after attempt 1, and a
      generated oracle is never written back into `tasks/`.
   Re-check whenever the task-authoring path or a prompt signature changes. **Widening one of
@@ -236,11 +441,22 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   while measuring; treat prompt-quality work and spec-quality work as separate experiments and
   never vary both at once. This does not block ordinary hackathon prompt work or the core demo.
 
-- [ ] **C2 — Harden F1 transport and retry policy before production use.** The current client
-  permits `http://` for local development and makes one immediate retry after request/read
-  errors, HTTP 429, or HTTP 5xx. Before production or repeated non-local use, restrict plaintext
-  HTTP or require an explicit opt-in, honor `Retry-After`/backoff, and narrow retries to known
-  temporary failures so a paid POST is not duplicated unnecessarily.
+- [~] **C6 — Generated oracle semantic validity and answer-key provenance.** F16 proves only
+  that generated Go test source is structurally admissible and compiles against a
+  signature-derived stub. It cannot establish that a hard-coded expected value satisfies the
+  specification. An observed generated oracle contained an impossible arithmetic answer key and
+  falsely rejected a plausible candidate on every attempt. Distinguish structural admission,
+  deterministic validity rules, and trusted-reference answer keys. An LLM committee may reject
+  suspicious source before freezing, but is a filter rather than evidence of truth. Free-form
+  generated tasks remain explicitly unaudited semantically.
+
+- [ ] **C2 — Harden provider-adapter transport and retry policy before production use.** The
+  current OpenAI adapter permits `http://` for local development and delegates one configured
+  retry to the official SDK, which can use provider backoff/`Retry-After` guidance. Before
+  production or repeated non-local use, restrict plaintext HTTP or require an explicit opt-in,
+  decide exactly which transport/status failures may retry, and account for the possibility that
+  a paid POST completed before a retryable connection failure. Preserve the whole-call context
+  deadline, response-size bound, and sanitized error contract across every future adapter.
 
 - [x] **C3 — Resolve Phase 0 data and error contracts before F2/F3.** `internal/domain` owns
   dependency-free `Task` and `Attempt`; `internal/task` is a future loader only. F2 will create
@@ -269,6 +485,13 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
 
 ### High
 
+- [~] **B3 — Generated oracle can falsely reject a candidate with an internally inconsistent
+  answer key.** A saved historical trace froze an impossible expected result, so every candidate
+  attempt failed the same invalid assertion. Preserve the trace only as an archived teaching
+  artifact; do not route future browser tasks through task-specific semantic code. The active
+  mitigation is honest labeling, structural preflight, and human/trusted-source review when a
+  task needs stronger semantic verification.
+
 - [x] **B1 — Make browser runs observable and bounded.** A browser run previously exposed only
   `running` plus completed attempts, so a delayed provider response or Go check looked frozen;
   the page could also lose its poller without stopping the server-side job. Add an explicit live
@@ -280,6 +503,18 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   callbacks tied to an earlier run.
   Verification (2026-07-18): `go build ./...`, `go test ./...`, server cancel-route tests, and
   run-store provider-wait/verifier/cancel/timeout tests passed. No live provider call was needed.
+
+- [x] **B2 — Require server-side start idempotency tokens.** `POST /run` is documented as
+  accepting a browser-generated idempotency token, but an empty `requestId` currently passes
+  validation and bypasses the replay registry. A direct caller can therefore start another paid
+  run after a prior run becomes terminal. Reject missing or whitespace-only request IDs with
+  `400`; retain the existing alphabet/length validation and same-token replay behavior across
+  both live and terminal runs. Do not invent a server-only replacement token, because the browser
+  must be able to retry an ambiguous start response with the same value. Add handler tests for
+  missing/blank rejection and unchanged replay behavior.
+  Verification (2026-07-20): `go build ./...`, `go test ./...`, focused
+  `go test ./internal/server`, `go vet ./...`, `gofmt`, and `git diff --check` passed. No live
+  provider call was made.
 
 ### Medium
 *None yet.*

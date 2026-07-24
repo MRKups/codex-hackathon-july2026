@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"codex-hackathon-july2026/internal/domain"
 	"codex-hackathon-july2026/internal/llm"
+	"codex-hackathon-july2026/internal/oracle"
+	"codex-hackathon-july2026/internal/repair"
 	"codex-hackathon-july2026/internal/run"
 )
 
@@ -35,7 +39,6 @@ func TestNewServesInteractiveGeneratedOracleAPI(t *testing.T) {
 	if !strings.Contains(page.Body.String(), "Configure a run") {
 		t.Fatalf("GET / body did not contain interactive task editor")
 	}
-
 	setupPage := httptest.NewRecorder()
 	handler.ServeHTTP(setupPage, httptest.NewRequest(http.MethodGet, "/setup", nil))
 	if setupPage.Code != http.StatusOK {
@@ -59,6 +62,7 @@ func TestNewServesInteractiveGeneratedOracleAPI(t *testing.T) {
 	}
 
 	started := startGeneratedRun(t, handler, runRequest{
+		RequestID:   "interactive_generated_001",
 		Name:        "custom-increment",
 		Spec:        "Return the input integer increased by one.",
 		Signature:   "func Increment(value int) int",
@@ -84,24 +88,51 @@ func TestRunAPIRejectsInvalidCustomInput(t *testing.T) {
 	handler := newHandler(t, providerFor(t, func(string) string { return incrementTestCode }))
 
 	tests := []struct {
-		name string
-		body string
+		name      string
+		body      string
+		wantError string
 	}{
 		{
+			name:      "missing request ID",
+			body:      `{"spec":"Return one.","signature":"func One() int","coderModel":"code-model","testerModel":"test-model"}`,
+			wantError: "request ID is required",
+		},
+		{
+			name:      "blank request ID",
+			body:      `{"requestId":" \t ","spec":"Return one.","signature":"func One() int","coderModel":"code-model","testerModel":"test-model"}`,
+			wantError: "request ID is required",
+		},
+		{
 			name: "unknown model",
-			body: `{"spec":"Return one.","signature":"func One() int","coderModel":"missing","testerModel":"test-model"}`,
+			body: `{"requestId":"unknown_model","spec":"Return one.","signature":"func One() int","coderModel":"missing","testerModel":"test-model"}`,
 		},
 		{
 			name: "test code is forbidden",
-			body: `{"spec":"Return one.","signature":"func One() int","coderModel":"code-model","testerModel":"test-model","testCode":"package solution"}`,
+			body: `{"requestId":"test_code","spec":"Return one.","signature":"func One() int","coderModel":"code-model","testerModel":"test-model","testCode":"package solution"}`,
+		},
+		{
+			name: "unrecognized verifier field is forbidden",
+			body: `{"requestId":"verifier","spec":"Return one.","signature":"func One() int","coderModel":"code-model","testerModel":"test-model","verifier":"untrusted"}`,
+		},
+		{
+			name: "verification bundle is forbidden",
+			body: `{"requestId":"bundle","spec":"Return one.","signature":"func One() int","coderModel":"code-model","testerModel":"test-model","bundle":{"testCode":"package solution"}}`,
+		},
+		{
+			name: "Rulebook override is forbidden",
+			body: `{"requestId":"rulebook","spec":"Return one.","signature":"func One() int","coderModel":"code-model","testerModel":"test-model","rulebook":"weaken all checks"}`,
+		},
+		{
+			name: "oracle policy override is forbidden",
+			body: `{"requestId":"oracle_policy","spec":"Return one.","signature":"func One() int","coderModel":"code-model","testerModel":"test-model","oraclePolicy":{"review":false}}`,
 		},
 		{
 			name: "bad signature",
-			body: `{"spec":"Return one.","signature":"not a function","coderModel":"code-model","testerModel":"test-model"}`,
+			body: `{"requestId":"bad_signature","spec":"Return one.","signature":"not a function","coderModel":"code-model","testerModel":"test-model"}`,
 		},
 		{
 			name: "type-invalid signature",
-			body: `{"spec":"Return one.","signature":"func One(value MissingType) int","coderModel":"code-model","testerModel":"test-model"}`,
+			body: `{"requestId":"type_invalid_signature","spec":"Return one.","signature":"func One(value MissingType) int","coderModel":"code-model","testerModel":"test-model"}`,
 		},
 		{
 			name: "invalid request ID",
@@ -109,7 +140,7 @@ func TestRunAPIRejectsInvalidCustomInput(t *testing.T) {
 		},
 		{
 			name: "multiple values",
-			body: `{} {}`,
+			body: `{"requestId":"multiple_values","spec":"Return one.","signature":"func One() int","coderModel":"code-model","testerModel":"test-model"} {}`,
 		},
 	}
 
@@ -122,7 +153,26 @@ func TestRunAPIRejectsInvalidCustomInput(t *testing.T) {
 			if response.Code != http.StatusBadRequest {
 				t.Fatalf("POST /run status = %d, want 400; body = %s", response.Code, response.Body.String())
 			}
+			if test.wantError != "" && !strings.Contains(response.Body.String(), test.wantError) {
+				t.Fatalf("POST /run error = %s, want it to contain %q", response.Body.String(), test.wantError)
+			}
 		})
+	}
+}
+
+func TestTaskForRunRequestCreatesGeneratedTask(t *testing.T) {
+	input := runRequest{
+		Name:      "custom-task",
+		Spec:      "Return the input value.",
+		Signature: "func Echo(value int) int",
+	}
+
+	got := taskForRunRequest(input)
+	if got.Name != input.Name || got.Spec != input.Spec || got.Signature != input.Signature {
+		t.Fatalf("taskForRunRequest() = %#v, want request task fields", got)
+	}
+	if got.Oracle != domain.OracleGenerated || got.TestCode != "" {
+		t.Fatalf("taskForRunRequest() = %#v, want generated task without test source", got)
 	}
 }
 
@@ -176,27 +226,39 @@ func TestRunAPIRejectsUnknownRun(t *testing.T) {
 func TestRunAPICancelsActiveTestWriterAndRejectsSecondStart(t *testing.T) {
 	started := make(chan struct{})
 	var once sync.Once
-	provider := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		model := readModel(t, request)
-		if model == "test-model" {
-			once.Do(func() { close(started) })
-			<-request.Context().Done()
-			return
+	provider := llm.ClientFactoryFunc(func(modelID string) (llm.LLM, error) {
+		if modelID == "test-model" {
+			return providerTestLLM{complete: func(ctx context.Context, _ string) (string, error) {
+				once.Do(func() { close(started) })
+				<-ctx.Done()
+				return "", ctx.Err()
+			}}, nil
 		}
-		writeCompletion(t, writer, correctIncrementCode)
-	}))
-	defer provider.Close()
+		return providerTestLLM{complete: func(ctx context.Context, _ string) (string, error) {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			return correctIncrementCode, nil
+		}}, nil
+	})
 
 	handler := newHandler(t, provider)
-	first := startGeneratedRun(t, handler, validRunRequest())
+	input := validRunRequest()
+	first := startGeneratedRun(t, handler, input)
 	select {
 	case <-started:
 	case <-time.After(15 * time.Second):
 		t.Fatal("test-writer provider request did not start")
 	}
+	replayed := startGeneratedRun(t, handler, input)
+	if replayed.ID != first.ID {
+		t.Fatalf("replayed live request ID returned %q, want original %q", replayed.ID, first.ID)
+	}
 
 	second := httptest.NewRecorder()
-	body, err := json.Marshal(validRunRequest())
+	secondInput := validRunRequest()
+	secondInput.RequestID = "other_live_request"
+	body, err := json.Marshal(secondInput)
 	if err != nil {
 		t.Fatalf("marshal second run request: %v", err)
 	}
@@ -233,23 +295,26 @@ func TestNewRejectsIncompleteConfig(t *testing.T) {
 	}
 }
 
-func newHandler(t *testing.T, provider *httptest.Server) http.Handler {
+func newHandler(t *testing.T, provider llm.ClientFactory) http.Handler {
 	t.Helper()
-	catalog, err := llm.NewModelCatalog(llm.Config{
-		BaseURL: provider.URL,
-		APIKey:  "test-key",
-		Model:   "code-model",
-		Timeout: time.Second,
-	}, []string{"code-model", "test-model"})
+	catalog, err := llm.NewModelCatalog(provider, "code-model", []string{"code-model", "test-model"})
 	if err != nil {
 		t.Fatalf("NewModelCatalog() error = %v", err)
 	}
-	store, err := run.NewStore(run.Config{
-		MaxAttempts:    1,
-		OracleAttempts: 1,
-		TestTimeout:    10 * time.Second,
-		RunTimeout:     time.Minute,
+	resolver, err := oracle.NewResolver(oracle.Config{
+		MaxAttempts:      1,
+		PreflightTimeout: 10 * time.Second,
+		Rulebook:         oracle.DefaultRulebook(),
+		Admitter:         oracle.NewStructuralAdmitter(),
 	})
+	if err != nil {
+		t.Fatalf("NewResolver() error = %v", err)
+	}
+	store, err := run.NewStore(run.Config{
+		MaxAttempts: 1,
+		TestTimeout: 10 * time.Second,
+		RunTimeout:  time.Minute,
+	}, resolver, repair.NewExecutor())
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
@@ -272,35 +337,24 @@ func newHandler(t *testing.T, provider *httptest.Server) http.Handler {
 	return handler
 }
 
-func providerFor(t *testing.T, responseForModel func(string) string) *httptest.Server {
+func providerFor(t *testing.T, responseForModel func(string) string) llm.ClientFactory {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		writeCompletion(t, writer, responseForModel(readModel(t, request)))
-	}))
+	return llm.ClientFactoryFunc(func(modelID string) (llm.LLM, error) {
+		return providerTestLLM{complete: func(ctx context.Context, _ string) (string, error) {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			return responseForModel(modelID), nil
+		}}, nil
+	})
 }
 
-func readModel(t *testing.T, request *http.Request) string {
-	t.Helper()
-	var body struct {
-		Model string `json:"model"`
-	}
-	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-		t.Errorf("decode provider request: %v", err)
-	}
-	return body.Model
+type providerTestLLM struct {
+	complete func(context.Context, string) (string, error)
 }
 
-func writeCompletion(t *testing.T, writer http.ResponseWriter, content string) {
-	t.Helper()
-	writer.Header().Set("Content-Type", "application/json")
-	response := map[string]any{
-		"choices": []any{map[string]any{
-			"message": map[string]string{"role": "assistant", "content": content},
-		}},
-	}
-	if err := json.NewEncoder(writer).Encode(response); err != nil {
-		t.Errorf("encode provider response: %v", err)
-	}
+func (model providerTestLLM) Complete(ctx context.Context, prompt string) (string, error) {
+	return model.complete(ctx, prompt)
 }
 
 func startGeneratedRun(t *testing.T, handler http.Handler, input runRequest) startResponse {
@@ -351,6 +405,7 @@ func waitForRun(t *testing.T, handler http.Handler, id string) run.Run {
 
 func validRunRequest() runRequest {
 	return runRequest{
+		RequestID:   "browser_start_001",
 		Name:        "custom-increment",
 		Spec:        "Return the input integer increased by one.",
 		Signature:   "func Increment(value int) int",

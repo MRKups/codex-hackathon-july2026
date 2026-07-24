@@ -1,4 +1,4 @@
-// Package server exposes the repair-loop browser API and embedded page.
+// Package server exposes the verification-platform browser API and embedded page.
 package server
 
 import (
@@ -30,7 +30,7 @@ type ModelDefaults struct {
 }
 
 // Preset is an editable browser starting point. It intentionally has no oracle source: every
-// interactive task starts in generated-oracle mode and remains structurally blind.
+// interactive task uses the same generated-oracle path after the user submits the form.
 type Preset struct {
 	Name      string `json:"name"`
 	Spec      string `json:"spec"`
@@ -83,11 +83,14 @@ func New(config Config) (http.Handler, error) {
 			return
 		}
 
+		task := taskForRunRequest(input)
+
 		coder, err := config.Models.Resolve(input.CoderModel)
 		if err != nil {
 			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "unknown code-writer model"})
 			return
 		}
+
 		tester, err := config.Models.Resolve(input.TesterModel)
 		if err != nil {
 			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "unknown test-writer model"})
@@ -96,12 +99,7 @@ func New(config Config) (http.Handler, error) {
 
 		id, err := starts.start(input.RequestID, func() (string, error) {
 			return config.Store.StartRun(
-				domain.Task{
-					Name:      input.Name,
-					Spec:      input.Spec,
-					Signature: input.Signature,
-					Oracle:    domain.OracleGenerated,
-				},
+				task,
 				run.Roles{
 					Coder:       coder,
 					Tester:      tester,
@@ -168,6 +166,15 @@ type runRequest struct {
 	Signature   string `json:"signature"`
 	CoderModel  string `json:"coderModel"`
 	TesterModel string `json:"testerModel"`
+}
+
+func taskForRunRequest(input runRequest) domain.Task {
+	return domain.Task{
+		Name:      input.Name,
+		Spec:      input.Spec,
+		Signature: input.Signature,
+		Oracle:    domain.OracleGenerated,
+	}
 }
 
 func decodeRunRequest(writer http.ResponseWriter, request *http.Request) (runRequest, error) {
@@ -237,7 +244,7 @@ func normalizeRunRequest(input runRequest) (runRequest, error) {
 
 func validateRequestID(requestID string) error {
 	if requestID == "" {
-		return nil
+		return errors.New("request ID is required")
 	}
 	if len(requestID) > maxRequestIDBytes {
 		return fmt.Errorf("request ID exceeds %d bytes", maxRequestIDBytes)
@@ -256,6 +263,7 @@ func validateRequestID(requestID string) error {
 
 func validatePreset(preset Preset) error {
 	_, err := normalizeRunRequest(runRequest{
+		RequestID:   "preset-validation",
 		Name:        preset.Name,
 		Spec:        preset.Spec,
 		Signature:   preset.Signature,
@@ -308,7 +316,7 @@ func newStartRegistry() *startRegistry {
 
 func (registry *startRegistry) start(requestID string, start func() (string, error)) (string, error) {
 	if requestID == "" {
-		return start()
+		return "", errors.New("request ID is required")
 	}
 
 	registry.mu.Lock()

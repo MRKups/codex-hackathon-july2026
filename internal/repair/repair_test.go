@@ -8,16 +8,14 @@ import (
 	"time"
 
 	"codex-hackathon-july2026/internal/domain"
-	"codex-hackathon-july2026/internal/llm"
+	"codex-hackathon-july2026/internal/verification"
 )
 
-const (
-	oracleSourceSentinel          = "F4_ORACLE_SOURCE_SENTINEL"
-	generatedOracleSourceSentinel = "F15_GENERATED_ORACLE_SOURCE_SENTINEL"
-)
+const oracleSourceSentinel = "F4_ORACLE_SOURCE_SENTINEL"
 
-func TestRepairRetriesWithVerifierFeedback(t *testing.T) {
+func TestRepairRetriesWithVerifierFeedbackWithoutLeakingBundle(t *testing.T) {
 	task := repairTask()
+	bundle := sealedBundle(t, task)
 	wrongCode := `package solution
 
 func Increment(value int) int {
@@ -36,62 +34,45 @@ func Increment(value int) int {
 	}}
 
 	var reported []domain.Attempt
-	final, err := Repair(context.Background(), coder, nil, task, 2, 10*time.Second, 0, ProgressReporter{
+	final, err := RepairWithConfig(context.Background(), coder, candidateRequest(task, bundle), Config{
+		MaxAttempts: 2,
+		TestTimeout: 10 * time.Second,
+	}, ProgressReporter{
 		AttemptFinished: func(attempt domain.Attempt) error {
 			reported = append(reported, attempt)
 			return nil
 		},
 	})
 	if err != nil {
-		t.Fatalf("Repair() error = %v", err)
+		t.Fatalf("RepairWithConfig() error = %v", err)
 	}
-	if !final.Passed {
-		t.Fatalf("Repair() final attempt = %#v, want pass", final)
+	if !final.Passed || final.N != 2 || final.Code != correctCode || final.Output != "" {
+		t.Fatalf("RepairWithConfig() final = %#v, want passing second candidate", final)
 	}
-	if final.N != 2 {
-		t.Fatalf("Repair() final attempt number = %d, want 2", final.N)
-	}
-	if final.Code != correctCode {
-		t.Fatalf("Repair() final code = %q, want %q", final.Code, correctCode)
-	}
-	if final.Output != "" {
-		t.Fatalf("Repair() final output = %q, want empty", final.Output)
-	}
-	if len(reported) != 2 {
-		t.Fatalf("reporter calls = %d, want 2", len(reported))
-	}
-	if reported[0].N != 1 || reported[0].Passed {
-		t.Fatalf("first reported attempt = %#v, want failed attempt 1", reported[0])
-	}
-	if reported[0].Code != wrongCode {
-		t.Fatalf("first reported code = %q, want extracted fenced code %q", reported[0].Code, wrongCode)
+	if len(reported) != 2 || reported[0].Passed || !reported[1].Passed {
+		t.Fatalf("reported attempts = %#v, want failed then passed", reported)
 	}
 	if !strings.Contains(reported[0].Output, "F4_TEST_FAILURE_MARKER") {
-		t.Fatalf("first reported output = %q, want verifier failure marker", reported[0].Output)
-	}
-	if reported[1] != final {
-		t.Fatalf("second reported attempt = %#v, want final %#v", reported[1], final)
+		t.Fatalf("first output = %q, want verifier failure marker", reported[0].Output)
 	}
 	if len(coder.prompts) != 2 {
 		t.Fatalf("coder calls = %d, want 2", len(coder.prompts))
 	}
 	if !strings.Contains(coder.prompts[0], task.Spec) || !strings.Contains(coder.prompts[0], task.Signature) {
-		t.Fatalf("first prompt did not contain task details:\n%s", coder.prompts[0])
+		t.Fatalf("first candidate prompt omitted task details:\n%s", coder.prompts[0])
 	}
-	if !strings.Contains(coder.prompts[1], reported[0].Code) {
-		t.Fatalf("repair prompt did not contain prior candidate:\n%s", coder.prompts[1])
-	}
-	if !strings.Contains(coder.prompts[1], reported[0].Output) {
-		t.Fatalf("repair prompt did not contain exact verifier output:\n%s", coder.prompts[1])
+	if !strings.Contains(coder.prompts[1], wrongCode) || !strings.Contains(coder.prompts[1], reported[0].Output) {
+		t.Fatalf("repair prompt omitted prior candidate or feedback:\n%s", coder.prompts[1])
 	}
 	for number, promptText := range coder.prompts {
-		if strings.Contains(promptText, oracleSourceSentinel) {
-			t.Fatalf("coder prompt %d included authored oracle source:\n%s", number+1, promptText)
+		if strings.Contains(promptText, oracleSourceSentinel) || strings.Contains(promptText, "Oracle Rulebook") {
+			t.Fatalf("candidate prompt %d leaked oracle material:\n%s", number+1, promptText)
 		}
 	}
 }
 
 func TestRepairReturnsLastFailureWhenAttemptsAreExhausted(t *testing.T) {
+	task := repairTask()
 	coder := &scriptedLLM{responses: []scriptedResponse{{text: `package solution
 
 func Increment(value int) int {
@@ -99,745 +80,152 @@ func Increment(value int) int {
 }
 `}}}
 
-	final, err := Repair(context.Background(), coder, nil, repairTask(), 1, 10*time.Second, 0, ProgressReporter{})
+	final, err := RepairWithConfig(context.Background(), coder, candidateRequest(task, sealedBundle(t, task)), Config{
+		MaxAttempts: 1,
+		TestTimeout: 10 * time.Second,
+	}, ProgressReporter{})
 	if err != nil {
-		t.Fatalf("Repair() error = %v", err)
+		t.Fatalf("RepairWithConfig() error = %v", err)
 	}
-	if final.N != 1 || final.Passed {
-		t.Fatalf("Repair() final attempt = %#v, want failed attempt 1", final)
-	}
-	if !strings.Contains(final.Output, "F4_TEST_FAILURE_MARKER") {
-		t.Fatalf("Repair() final output = %q, want verifier failure marker", final.Output)
-	}
-	if len(coder.prompts) != 1 {
-		t.Fatalf("coder calls = %d, want 1", len(coder.prompts))
+	if final.N != 1 || final.Passed || !strings.Contains(final.Output, "F4_TEST_FAILURE_MARKER") {
+		t.Fatalf("final attempt = %#v, want failed first attempt", final)
 	}
 }
 
-func TestRepairReturnsLastCompletedAttemptOnProviderError(t *testing.T) {
+func TestRepairReturnsLastCompletedAttemptOnProviderOrReporterFailure(t *testing.T) {
 	providerErr := errors.New("provider unavailable")
+	task := repairTask()
 	coder := &scriptedLLM{responses: []scriptedResponse{
 		{text: `package solution
 
-func Increment(value int) int {
-	return value - 1
-}
+func Increment(value int) int { return value - 1 }
 `},
 		{err: providerErr},
 	}}
-
-	var reported []domain.Attempt
-	final, err := Repair(context.Background(), coder, nil, repairTask(), 2, 10*time.Second, 0, ProgressReporter{
-		AttemptFinished: func(attempt domain.Attempt) error {
-			reported = append(reported, attempt)
-			return nil
-		},
-	})
+	final, err := RepairWithConfig(context.Background(), coder, candidateRequest(task, sealedBundle(t, task)), Config{
+		MaxAttempts: 2,
+		TestTimeout: 10 * time.Second,
+	}, ProgressReporter{})
 	if !errors.Is(err, providerErr) {
-		t.Fatalf("Repair() error = %v, want provider error", err)
+		t.Fatalf("provider failure error = %v, want %v", err, providerErr)
 	}
 	if final.N != 1 || final.Passed {
-		t.Fatalf("Repair() final attempt = %#v, want prior failed attempt", final)
+		t.Fatalf("provider failure final = %#v, want first failed attempt", final)
 	}
-	if len(reported) != 1 || reported[0] != final {
-		t.Fatalf("reported attempts = %#v, want only %#v", reported, final)
+
+	reporterErr := errors.New("snapshot write failed")
+	coder = &scriptedLLM{responses: []scriptedResponse{{text: `package solution
+
+func Increment(value int) int { return value - 1 }
+`}}}
+	final, err = RepairWithConfig(context.Background(), coder, candidateRequest(task, sealedBundle(t, task)), Config{
+		MaxAttempts: 1,
+		TestTimeout: 10 * time.Second,
+	}, ProgressReporter{AttemptFinished: func(domain.Attempt) error { return reporterErr }})
+	if !errors.Is(err, reporterErr) {
+		t.Fatalf("reporter failure error = %v, want %v", err, reporterErr)
 	}
-	if len(coder.prompts) != 2 {
-		t.Fatalf("coder calls = %d, want 2", len(coder.prompts))
+	if final.N != 1 || final.Passed {
+		t.Fatalf("reporter failure final = %#v, want first failed attempt", final)
 	}
 }
 
-func TestRepairReturnsNoAttemptOnInitialProviderError(t *testing.T) {
+func TestRepairReturnsNoAttemptBeforeAnyCompletedVerification(t *testing.T) {
+	task := repairTask()
 	providerErr := errors.New("provider unavailable")
 	coder := &scriptedLLM{responses: []scriptedResponse{{err: providerErr}}}
-
-	final, err := Repair(context.Background(), coder, nil, repairTask(), 1, 10*time.Second, 0, ProgressReporter{})
-	if !errors.Is(err, providerErr) {
-		t.Fatalf("Repair() error = %v, want provider error", err)
-	}
-	if final != (domain.Attempt{}) {
-		t.Fatalf("Repair() final attempt = %#v, want zero attempt", final)
-	}
-	if len(coder.prompts) != 1 {
-		t.Fatalf("coder calls = %d, want 1", len(coder.prompts))
-	}
-}
-
-func TestRepairReturnsReporterErrorAfterCompletedAttempt(t *testing.T) {
-	reporterErr := errors.New("reporter failed")
-	coder := &scriptedLLM{responses: []scriptedResponse{{text: `package solution
-
-func Increment(value int) int {
-	return value - 1
-}
-`}}}
-
-	var reported domain.Attempt
-	final, err := Repair(context.Background(), coder, nil, repairTask(), 2, 10*time.Second, 0, ProgressReporter{
-		AttemptFinished: func(attempt domain.Attempt) error {
-			reported = attempt
-			return reporterErr
-		},
-	})
-	if !errors.Is(err, reporterErr) {
-		t.Fatalf("Repair() error = %v, want reporter error", err)
-	}
-	if final != reported {
-		t.Fatalf("Repair() final attempt = %#v, want reported attempt %#v", final, reported)
-	}
-	if final.N != 1 || final.Passed {
-		t.Fatalf("Repair() final attempt = %#v, want failed attempt 1", final)
-	}
-	if len(coder.prompts) != 1 {
-		t.Fatalf("coder calls = %d, want 1", len(coder.prompts))
-	}
-}
-
-func TestRepairRejectsInvalidInputsBeforeCallingCoder(t *testing.T) {
-	tests := []struct {
-		name        string
-		ctx         context.Context
-		coder       bool
-		task        domain.Task
-		maxAttempts int
-		timeout     time.Duration
-	}{
-		{
-			name:        "nil context",
-			ctx:         nil,
-			coder:       true,
-			task:        repairTask(),
-			maxAttempts: 1,
-			timeout:     time.Second,
-		},
-		{
-			name:        "nil coder",
-			ctx:         context.Background(),
-			coder:       false,
-			task:        repairTask(),
-			maxAttempts: 1,
-			timeout:     time.Second,
-		},
-		{
-			name:        "zero attempt cap",
-			ctx:         context.Background(),
-			coder:       true,
-			task:        repairTask(),
-			maxAttempts: 0,
-			timeout:     time.Second,
-		},
-		{
-			name:        "negative verifier timeout",
-			ctx:         context.Background(),
-			coder:       true,
-			task:        repairTask(),
-			maxAttempts: 1,
-			timeout:     -time.Second,
-		},
-		{
-			name:        "missing authored oracle",
-			ctx:         context.Background(),
-			coder:       true,
-			task:        domain.Task{Spec: "unused", Signature: "func Unused()"},
-			maxAttempts: 1,
-			timeout:     time.Second,
-		},
+	final, err := RepairWithConfig(context.Background(), coder, candidateRequest(task, sealedBundle(t, task)), Config{
+		MaxAttempts: 1,
+		TestTimeout: time.Second,
+	}, ProgressReporter{})
+	if !errors.Is(err, providerErr) || final != (domain.Attempt{}) {
+		t.Fatalf("initial provider result = (%#v, %v), want zero attempt and provider error", final, err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			coder := &scriptedLLM{}
-			var model llm.LLM = coder
-			if !tt.coder {
-				model = nil
-			}
-
-			final, err := Repair(tt.ctx, model, nil, tt.task, tt.maxAttempts, tt.timeout, 0, ProgressReporter{})
-			if err == nil {
-				t.Fatal("Repair() error = nil, want validation error")
-			}
-			if final != (domain.Attempt{}) {
-				t.Fatalf("Repair() final attempt = %#v, want zero attempt", final)
-			}
-			if len(coder.prompts) != 0 {
-				t.Fatalf("coder calls = %d, want 0", len(coder.prompts))
-			}
-		})
-	}
-}
-
-func TestRepairReturnsCallerCancellationBeforeCallingCoder(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	coder := &scriptedLLM{}
-
-	final, err := Repair(ctx, coder, nil, repairTask(), 1, time.Second, 0, ProgressReporter{})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Repair() error = %v, want context.Canceled", err)
-	}
-	if final != (domain.Attempt{}) {
-		t.Fatalf("Repair() final attempt = %#v, want zero attempt", final)
-	}
-	if len(coder.prompts) != 0 {
-		t.Fatalf("coder calls = %d, want 0", len(coder.prompts))
+	coder = &scriptedLLM{}
+	final, err = RepairWithConfig(ctx, coder, candidateRequest(task, sealedBundle(t, task)), Config{
+		MaxAttempts: 1,
+		TestTimeout: time.Second,
+	}, ProgressReporter{})
+	if !errors.Is(err, context.Canceled) || final != (domain.Attempt{}) || len(coder.prompts) != 0 {
+		t.Fatalf("canceled repair result = (%#v, %v), prompts=%d; want zero/no prompt/context canceled", final, err, len(coder.prompts))
 	}
 }
 
-func TestRepairResolvesGeneratedOracleBeforeCoderAndFreezesIt(t *testing.T) {
-	task := generatedRepairTask()
-	wrongCode := `package solution
+func TestRepairRejectsInvalidInputsAndBundleBeforeCoder(t *testing.T) {
+	task := repairTask()
+	validBundle := sealedBundle(t, task)
+	tampered := validBundle
+	tampered.TestCode += "// drift\n"
 
-func Increment(value int) int {
-	return value - 1
-}
-`
-	correctCode := `package solution
-
-func Increment(value int) int {
-	return value + 1
-}
-`
-	oracle := generatedIncrementOracle()
-
-	var order []string
-	tester := &scriptedLLM{
-		responses: []scriptedResponse{
-			{text: "```go\n" + oracle + "```\n"},
-			{text: "this response must stay unused after the oracle is frozen"},
-		},
-		onComplete: func(string) { order = append(order, "tester") },
-	}
-	coder := &scriptedLLM{
-		responses:  []scriptedResponse{{text: wrongCode}, {text: correctCode}},
-		onComplete: func(string) { order = append(order, "coder") },
-	}
-
-	var resolved []string
-	var reported []domain.Attempt
-	final, err := Repair(context.Background(), coder, tester, task, 2, 10*time.Second, 2, ProgressReporter{
-		OracleResolved: func(testCode string) error {
-			order = append(order, "oracle")
-			resolved = append(resolved, testCode)
-			return nil
-		},
-		AttemptFinished: func(attempt domain.Attempt) error {
-			order = append(order, "attempt")
-			reported = append(reported, attempt)
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("Repair() error = %v", err)
-	}
-	if !final.Passed || final.N != 2 {
-		t.Fatalf("Repair() final = %#v, want passing attempt 2", final)
-	}
-	if len(resolved) != 1 || resolved[0] != oracle {
-		t.Fatalf("resolved oracle = %#v, want exactly %q", resolved, oracle)
-	}
-	if len(reported) != 2 {
-		t.Fatalf("reported attempts = %d, want 2", len(reported))
-	}
-	wantOrder := []string{"tester", "oracle", "coder", "attempt", "coder", "attempt"}
-	if strings.Join(order, ",") != strings.Join(wantOrder, ",") {
-		t.Fatalf("operation order = %v, want %v", order, wantOrder)
-	}
-	if len(tester.prompts) != 1 {
-		t.Fatalf("tester calls = %d, want one accepted frozen oracle", len(tester.prompts))
-	}
-	if !strings.Contains(tester.prompts[0], task.Spec) || !strings.Contains(tester.prompts[0], task.Signature) {
-		t.Fatalf("tester prompt did not contain task details:\n%s", tester.prompts[0])
-	}
-	if strings.Contains(tester.prompts[0], wrongCode) || strings.Contains(tester.prompts[0], task.TestCode) {
-		t.Fatalf("tester prompt included code or stale test source:\n%s", tester.prompts[0])
-	}
-	for number, promptText := range coder.prompts {
-		if strings.Contains(promptText, generatedOracleSourceSentinel) || strings.Contains(promptText, task.TestCode) {
-			t.Fatalf("coder prompt %d included generated oracle source:\n%s", number+1, promptText)
-		}
-	}
-}
-
-func TestRepairRetriesRejectedGeneratedOracleBeforeCallingCoder(t *testing.T) {
-	task := generatedRepairTask()
-	rejectedOracle := `package solution
-
-import "testing"
-
-func TestIncrement(t *testing.T) {
-	if got := Increment(1); got == 99 {
-		t.Fatal("unexpected sentinel")
-	}
-	UndefinedOracleSymbol()
-}
-`
-	acceptedOracle := generatedIncrementOracle()
-	correctCode := `package solution
-
-func Increment(value int) int {
-	return value + 1
-}
-`
-
-	var order []string
-	tester := &scriptedLLM{
-		responses:  []scriptedResponse{{text: rejectedOracle}, {text: acceptedOracle}},
-		onComplete: func(string) { order = append(order, "tester") },
-	}
-	coder := &scriptedLLM{
-		responses:  []scriptedResponse{{text: correctCode}},
-		onComplete: func(string) { order = append(order, "coder") },
-	}
-
-	var resolved string
-	final, err := Repair(context.Background(), coder, tester, task, 1, 10*time.Second, 2, ProgressReporter{
-		OracleResolved: func(testCode string) error {
-			order = append(order, "oracle")
-			resolved = testCode
-			return nil
-		},
-		AttemptFinished: func(domain.Attempt) error {
-			order = append(order, "attempt")
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("Repair() error = %v", err)
-	}
-	if !final.Passed {
-		t.Fatalf("Repair() final = %#v, want pass", final)
-	}
-	if resolved != acceptedOracle {
-		t.Fatalf("resolved oracle = %q, want accepted candidate %q", resolved, acceptedOracle)
-	}
-	wantOrder := []string{"tester", "tester", "oracle", "coder", "attempt"}
-	if strings.Join(order, ",") != strings.Join(wantOrder, ",") {
-		t.Fatalf("operation order = %v, want %v", order, wantOrder)
-	}
-	if len(tester.prompts) != 2 {
-		t.Fatalf("tester calls = %d, want 2", len(tester.prompts))
-	}
-	for number, promptText := range tester.prompts {
-		if strings.Contains(promptText, rejectedOracle) || strings.Contains(promptText, correctCode) {
-			t.Fatalf("tester prompt %d leaked a rejected oracle or candidate:\n%s", number+1, promptText)
-		}
-	}
-	if len(coder.prompts) != 1 {
-		t.Fatalf("coder calls = %d, want 1 after oracle acceptance", len(coder.prompts))
-	}
-}
-
-func TestRepairReturnsTypedOracleFailureBeforeCallingCoder(t *testing.T) {
-	task := generatedRepairTask()
-	badOracle := `package solution
-
-import "testing"
-
-func TestIncrement(t *testing.T) {
-	if got := Increment(1); got == 99 {
-		t.Fatal("unexpected sentinel")
-	}
-	UndefinedOracleSymbol()
-}
-`
-	tester := &scriptedLLM{responses: []scriptedResponse{{text: badOracle}, {text: badOracle}}}
-	coder := &scriptedLLM{}
-
-	oracleNotifications := 0
-	attemptNotifications := 0
-	final, err := Repair(context.Background(), coder, tester, task, 1, 10*time.Second, 2, ProgressReporter{
-		OracleResolved: func(string) error {
-			oracleNotifications++
-			return nil
-		},
-		AttemptFinished: func(domain.Attempt) error {
-			attemptNotifications++
-			return nil
-		},
-	})
-	if final != (domain.Attempt{}) {
-		t.Fatalf("Repair() final = %#v, want zero attempt", final)
-	}
-	var oracleErr *OracleFailureError
-	if !errors.As(err, &oracleErr) {
-		t.Fatalf("Repair() error = %v, want OracleFailureError", err)
-	}
-	if oracleErr.Attempts != 2 {
-		t.Fatalf("OracleFailureError attempts = %d, want 2", oracleErr.Attempts)
-	}
-	if !strings.Contains(oracleErr.Output, "UndefinedOracleSymbol") {
-		t.Fatalf("OracleFailureError output = %q, want preflight compiler diagnostic", oracleErr.Output)
-	}
-	if len(tester.prompts) != 2 {
-		t.Fatalf("tester calls = %d, want 2", len(tester.prompts))
-	}
-	if len(coder.prompts) != 0 {
-		t.Fatalf("coder calls = %d, want 0", len(coder.prompts))
-	}
-	if oracleNotifications != 0 || attemptNotifications != 0 {
-		t.Fatalf("progress callbacks = oracle %d, attempts %d, want none", oracleNotifications, attemptNotifications)
-	}
-}
-
-func TestRepairReturnsTesterProviderErrorWithoutCoder(t *testing.T) {
-	providerErr := errors.New("tester provider unavailable")
-	tester := &scriptedLLM{responses: []scriptedResponse{{err: providerErr}}}
-	coder := &scriptedLLM{}
-
-	final, err := Repair(context.Background(), coder, tester, generatedRepairTask(), 1, 10*time.Second, 1, ProgressReporter{})
-	if final != (domain.Attempt{}) {
-		t.Fatalf("Repair() final = %#v, want zero attempt", final)
-	}
-	if !errors.Is(err, providerErr) {
-		t.Fatalf("Repair() error = %v, want tester provider error", err)
-	}
-	var oracleErr *OracleFailureError
-	if errors.As(err, &oracleErr) {
-		t.Fatalf("Repair() error = %v, must not classify a tester provider error as OracleFailureError", err)
-	}
-	if len(coder.prompts) != 0 {
-		t.Fatalf("coder calls = %d, want 0", len(coder.prompts))
-	}
-}
-
-func TestRepairRejectsInvalidGeneratedOracleConfigurationBeforeModels(t *testing.T) {
 	tests := []struct {
-		name               string
-		tester             llm.LLM
-		maxOracleAttempts  int
-		mutateTask         func(*domain.Task)
-		wantTesterRequests int
+		name   string
+		ctx    context.Context
+		coder  llmLike
+		bundle domain.VerificationBundle
+		config Config
 	}{
 		{
-			name:              "nil tester",
-			maxOracleAttempts: 1,
-			mutateTask:        func(*domain.Task) {},
+			name:   "nil context",
+			ctx:    nil,
+			coder:  &scriptedLLM{},
+			bundle: validBundle,
+			config: Config{MaxAttempts: 1, TestTimeout: time.Second},
 		},
 		{
-			name:              "zero oracle attempt cap",
-			tester:            &scriptedLLM{},
-			maxOracleAttempts: 0,
-			mutateTask:        func(*domain.Task) {},
+			name:   "nil coder",
+			ctx:    context.Background(),
+			coder:  nil,
+			bundle: validBundle,
+			config: Config{MaxAttempts: 1, TestTimeout: time.Second},
 		},
 		{
-			name:              "invalid signature",
-			tester:            &scriptedLLM{},
-			maxOracleAttempts: 1,
-			mutateTask: func(task *domain.Task) {
-				task.Signature = "this is not a Go function signature"
-			},
+			name:   "zero candidate cap",
+			ctx:    context.Background(),
+			coder:  &scriptedLLM{},
+			bundle: validBundle,
+			config: Config{TestTimeout: time.Second},
 		},
 		{
-			name:              "signature with an unknown type",
-			tester:            &scriptedLLM{},
-			maxOracleAttempts: 1,
-			mutateTask: func(task *domain.Task) {
-				task.Signature = "func Increment(value MissingType) int"
-			},
+			name:   "bad verifier timeout",
+			ctx:    context.Background(),
+			coder:  &scriptedLLM{},
+			bundle: validBundle,
+			config: Config{MaxAttempts: 1},
 		},
 		{
-			name:              "unknown oracle mode",
-			tester:            &scriptedLLM{},
-			maxOracleAttempts: 1,
-			mutateTask: func(task *domain.Task) {
-				task.Oracle = domain.OracleMode("unknown")
-			},
+			name:   "tampered frozen bundle",
+			ctx:    context.Background(),
+			coder:  &scriptedLLM{},
+			bundle: tampered,
+			config: Config{MaxAttempts: 1, TestTimeout: time.Second},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			task := generatedRepairTask()
-			tt.mutateTask(&task)
-			coder := &scriptedLLM{}
-
-			final, err := Repair(context.Background(), coder, tt.tester, task, 1, time.Second, tt.maxOracleAttempts, ProgressReporter{})
+			var coder interface {
+				Complete(context.Context, string) (string, error)
+			} = tt.coder
+			final, err := RepairWithConfig(tt.ctx, coder, candidateRequest(task, tt.bundle), tt.config, ProgressReporter{})
 			if err == nil {
-				t.Fatal("Repair() error = nil, want validation error")
+				t.Fatal("RepairWithConfig() error = nil, want validation error")
 			}
 			if final != (domain.Attempt{}) {
-				t.Fatalf("Repair() final = %#v, want zero attempt", final)
+				t.Fatalf("final = %#v, want zero attempt", final)
 			}
-			if len(coder.prompts) != 0 {
-				t.Fatalf("coder calls = %d, want 0", len(coder.prompts))
-			}
-			if tester, ok := tt.tester.(*scriptedLLM); ok && len(tester.prompts) != tt.wantTesterRequests {
-				t.Fatalf("tester calls = %d, want %d", len(tester.prompts), tt.wantTesterRequests)
+			if model, ok := tt.coder.(*scriptedLLM); ok && len(model.prompts) != 0 {
+				t.Fatalf("coder calls = %d, want 0", len(model.prompts))
 			}
 		})
 	}
 }
 
-func TestRepairReturnsOracleReporterErrorBeforeCallingCoder(t *testing.T) {
-	reporterErr := errors.New("could not persist frozen oracle")
-	coder := &scriptedLLM{}
-
-	final, err := Repair(context.Background(), coder, nil, repairTask(), 1, time.Second, 0, ProgressReporter{
-		OracleResolved: func(string) error { return reporterErr },
-	})
-	if !errors.Is(err, reporterErr) {
-		t.Fatalf("Repair() error = %v, want reporter error", err)
-	}
-	if final != (domain.Attempt{}) {
-		t.Fatalf("Repair() final = %#v, want zero attempt", final)
-	}
-	if len(coder.prompts) != 0 {
-		t.Fatalf("coder calls = %d, want 0", len(coder.prompts))
-	}
-}
-
-func TestRepairAuthoredModeAllowsNilTesterAndReportsFrozenOracle(t *testing.T) {
-	task := repairTask()
-	task.Oracle = domain.OracleAuthored
-	correctCode := `package solution
-
-func Increment(value int) int {
-	return value + 1
-}
-`
-	coder := &scriptedLLM{responses: []scriptedResponse{{text: correctCode}}}
-
-	var resolved []string
-	final, err := Repair(context.Background(), coder, nil, task, 1, 10*time.Second, 0, ProgressReporter{
-		OracleResolved: func(testCode string) error {
-			resolved = append(resolved, testCode)
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("Repair() error = %v", err)
-	}
-	if !final.Passed {
-		t.Fatalf("Repair() final = %#v, want pass", final)
-	}
-	if len(resolved) != 1 || resolved[0] != task.TestCode {
-		t.Fatalf("resolved authored oracle = %#v, want one fixed test source", resolved)
-	}
-}
-
-func TestPreflightOracleRequiresRunnableTestFunction(t *testing.T) {
-	stub, _, err := signatureStub("func Increment(value int) int")
-	if err != nil {
-		t.Fatalf("signatureStub() error = %v", err)
-	}
-	oracle := `package solution
-
-import "testing"
-
-func Testlowercase(t *testing.T) {}
-`
-	accepted, output, err := preflightOracle(context.Background(), stub, oracle, time.Second)
-	if err != nil {
-		t.Fatalf("preflightOracle() error = %v", err)
-	}
-	if accepted {
-		t.Fatal("preflightOracle() accepted = true, want rejection")
-	}
-	if !strings.Contains(output, "runnable Test function") {
-		t.Fatalf("preflightOracle() output = %q, want missing-test explanation", output)
-	}
-}
-
-func TestPreflightOracleCompilesWithoutRunningTestBodies(t *testing.T) {
-	stub, _, err := signatureStub("func Increment(value int) int")
-	if err != nil {
-		t.Fatalf("signatureStub() error = %v", err)
-	}
-	oracle := `package solution
-
-import "testing"
-
-func TestIncrement(t *testing.T) {
-	if false {
-		t.Fatal("ORACLE_TEST_FAILURE_METHOD_PRESENT")
-	}
-	panic("ORACLE_TEST_BODY_RAN")
-}
-`
-	accepted, output, err := preflightOracle(context.Background(), stub, oracle, time.Second)
-	if err != nil {
-		t.Fatalf("preflightOracle() error = %v", err)
-	}
-	if !accepted {
-		t.Fatalf("preflightOracle() accepted = false, output = %q; want compilation without executing the test", output)
-	}
-}
-
-func TestPreflightOracleRejectsBuildConstraintsAndProcessHooks(t *testing.T) {
-	stub, _, err := signatureStub("func Increment(value int) int")
-	if err != nil {
-		t.Fatalf("signatureStub() error = %v", err)
-	}
-
-	tests := []struct {
-		name       string
-		oracle     string
-		wantOutput string
-	}{
-		{
-			name: "go build constraint",
-			oracle: `//go:build ignore
-
-package solution
-
-import "testing"
-
-func TestIncrement(t *testing.T) {}
-`,
-			wantOutput: "build constraints",
-		},
-		{
-			name: "legacy build constraint",
-			oracle: `// +build ignore
-
-package solution
-
-import "testing"
-
-func TestIncrement(t *testing.T) {}
-`,
-			wantOutput: "build constraints",
-		},
-		{
-			name: "test main",
-			oracle: `package solution
-
-import (
-	"os"
-	"testing"
-)
-
-func TestMain(m *testing.M) { os.Exit(0) }
-
-func TestIncrement(t *testing.T) {}
-`,
-			wantOutput: "TestMain",
-		},
-		{
-			name: "init hook",
-			oracle: `package solution
-
-import "testing"
-
-func init() {}
-
-func TestIncrement(t *testing.T) {}
-`,
-			wantOutput: "TestMain or init",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			accepted, output, err := preflightOracle(context.Background(), stub, tt.oracle, time.Second)
-			if err != nil {
-				t.Fatalf("preflightOracle() error = %v", err)
-			}
-			if accepted {
-				t.Fatal("preflightOracle() accepted = true, want rejection")
-			}
-			if !strings.Contains(output, tt.wantOutput) {
-				t.Fatalf("preflightOracle() output = %q, want %q", output, tt.wantOutput)
-			}
-		})
-	}
-}
-
-func TestPreflightGeneratedOracleRejectsObviousBypasses(t *testing.T) {
-	stub, functionName, err := signatureStub("func Increment(value int) int")
-	if err != nil {
-		t.Fatalf("signatureStub() error = %v", err)
-	}
-
-	tests := []struct {
-		name       string
-		oracle     string
-		wantOutput string
-	}{
-		{
-			name: "does not call the required function",
-			oracle: `package solution
-
-import "testing"
-
-func TestSomething(t *testing.T) {
-	if 1 != 1 {
-		t.Fatal("impossible")
-	}
-}
-`,
-			wantOutput: "call required function Increment",
-		},
-		{
-			name: "does not use a testing failure method",
-			oracle: `package solution
-
-import "testing"
-
-func TestIncrement(t *testing.T) {
-	Increment(1)
-}
-`,
-			wantOutput: "testing failure method",
-		},
-		{
-			name: "skips the test",
-			oracle: `package solution
-
-import "testing"
-
-func TestIncrement(t *testing.T) {
-	Increment(1)
-	t.Skip("not a real assertion")
-}
-`,
-			wantOutput: "must not skip tests",
-		},
-		{
-			name: "calls os exit",
-			oracle: `package solution
-
-import (
-	"os"
-	"testing"
-)
-
-func TestIncrement(t *testing.T) {
-	Increment(1)
-	if false {
-		t.Fatal("unreachable")
-	}
-	os.Exit(0)
-}
-`,
-			wantOutput: "call os.Exit",
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			accepted, output, err := preflightOracleForFunction(context.Background(), stub, test.oracle, time.Second, functionName)
-			if err != nil {
-				t.Fatalf("preflightOracleForFunction() error = %v", err)
-			}
-			if accepted {
-				t.Fatal("preflightOracleForFunction() accepted = true, want rejection")
-			}
-			if !strings.Contains(output, test.wantOutput) {
-				t.Fatalf("preflightOracleForFunction() output = %q, want %q", output, test.wantOutput)
-			}
-		})
-	}
-}
-
-func TestPreflightOracleRejectsNonPositiveTimeout(t *testing.T) {
-	accepted, output, err := preflightOracle(context.Background(), "package solution\n", "package solution\n", 0)
-	if err == nil {
-		t.Fatal("preflightOracle() error = nil, want validation error")
-	}
-	if accepted || output != "" {
-		t.Fatalf("preflightOracle() = (%t, %q, %v), want false, empty output, error", accepted, output, err)
-	}
+// llmLike keeps the input-validation table readable while still matching llm.LLM structurally.
+type llmLike interface {
+	Complete(context.Context, string) (string, error)
 }
 
 func TestRunTestsPasses(t *testing.T) {
@@ -853,225 +241,215 @@ func TestSolve(t *testing.T) {
 `)
 	code := `package solution
 
-func Solve(left, right int) int {
-	return left + right
-}
+func Solve(left, right int) int { return left + right }
 `
 
 	passed, output, err := runTests(context.Background(), task, code, 10*time.Second)
-	if err != nil {
-		t.Fatalf("runTests() error = %v", err)
-	}
-	if !passed {
-		t.Fatalf("runTests() passed = false, output = %q", output)
-	}
-	if output != "" {
-		t.Fatalf("runTests() output = %q, want empty", output)
+	if err != nil || !passed || output != "" {
+		t.Fatalf("runTests() = (%t, %q, %v), want (true, empty, nil)", passed, output, err)
 	}
 }
 
-func TestRunTestsReturnsBuildFailureWithoutRunningTests(t *testing.T) {
-	task := authoredTask(`package solution
+func TestRunBundleTestsExecutesWithoutSourcesOrProviderEnvironment(t *testing.T) {
+	t.Setenv("LLM_API_KEY", "must-not-reach-candidate")
+	task := domain.Task{Spec: "Return two.", Signature: "func Solve() int"}
+	bundle, err := verification.AuthoredSource(task, `package solution
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
-func TestVerifierShouldNotRun(t *testing.T) {
-	t.Fatal("TEST_RAN_MARKER")
+func TestSolve(t *testing.T) {
+	if _, err := os.Stat("solution.go"); err == nil {
+		t.Fatal("test source could read candidate source")
+	}
+	if _, err := os.Stat("solution_test.go"); err == nil {
+		t.Fatal("test source could read its own oracle source")
+	}
+	if got := Solve(); got != 2 {
+		t.Fatalf("Solve() = %d, want 2", got)
+	}
 }
 `)
+	if err != nil {
+		t.Fatalf("AuthoredSource() error = %v", err)
+	}
 	code := `package solution
 
-func Solve( {
+import "os"
+
+func Solve() int {
+	if _, err := os.Stat("solution_test.go"); err == nil || os.Getenv("LLM_API_KEY") != "" {
+		return 1
+	}
+	return 2
+}
 `
 
-	passed, output, err := runTests(context.Background(), task, code, 10*time.Second)
-	if err != nil {
-		t.Fatalf("runTests() error = %v", err)
-	}
-	if passed {
-		t.Fatal("runTests() passed = true, want false")
-	}
-	if !strings.Contains(output, "solution.go") {
-		t.Fatalf("build output = %q, want solution.go diagnostic", output)
-	}
-	if strings.Contains(output, "TEST_RAN_MARKER") {
-		t.Fatalf("build failure unexpectedly ran task tests: %q", output)
+	passed, output, err := runBundleTests(context.Background(), bundle, code, 10*time.Second)
+	if err != nil || !passed || output != "" {
+		t.Fatalf("runBundleTests() = (%t, %q, %v), want (true, empty, nil)", passed, output, err)
 	}
 }
 
-func TestRunTestsReturnsTestFailure(t *testing.T) {
-	task := authoredTask(`package solution
+func TestRunBundleTestsRejectsSourceBypasses(t *testing.T) {
+	task := domain.Task{Spec: "Return one.", Signature: "func Solve() int"}
+	bundle, err := verification.AuthoredSource(task, `package solution
 
 import "testing"
 
 func TestSolve(t *testing.T) {
-	if got := Solve(2, 3); got != 5 {
-		t.Fatalf("TEST_FAILURE_MARKER: got %d, want 5", got)
+	if got := Solve(); got != 1 {
+		t.Fatalf("Solve() = %d, want 1", got)
 	}
 }
 `)
-	code := `package solution
-
-func Solve(left, right int) int {
-	return left - right
-}
-`
-
-	passed, output, err := runTests(context.Background(), task, code, 10*time.Second)
 	if err != nil {
-		t.Fatalf("runTests() error = %v", err)
+		t.Fatalf("AuthoredSource() error = %v", err)
 	}
-	if passed {
-		t.Fatal("runTests() passed = true, want false")
-	}
-	if !strings.Contains(output, "TEST_FAILURE_MARKER") {
-		t.Fatalf("test output = %q, want failure marker", output)
-	}
-}
 
-func TestRunTestsReturnsMalformedTestFailure(t *testing.T) {
-	task := authoredTask(`package solution
-
-func TestBroken(t *testing.T) {}
-`)
-	code := `package solution
-
-func Solve() {}
-`
-
-	passed, output, err := runTests(context.Background(), task, code, 10*time.Second)
-	if err != nil {
-		t.Fatalf("runTests() error = %v", err)
-	}
-	if passed {
-		t.Fatal("runTests() passed = true, want false")
-	}
-	if !strings.Contains(output, "solution_test.go") {
-		t.Fatalf("test output = %q, want solution_test.go diagnostic", output)
-	}
-}
-
-func TestRunTestsReturnsVerifierTimeoutAsFeedback(t *testing.T) {
-	task := authoredTask(`package solution
-
-import "testing"
-
-func TestSolve(t *testing.T) {
-	Solve()
-}
-`)
-	code := `package solution
-
-func Solve() {
-	for {
-	}
-}
-`
-
-	passed, output, err := runTests(context.Background(), task, code, 5*time.Second)
-	if err != nil {
-		t.Fatalf("runTests() error = %v", err)
-	}
-	if passed {
-		t.Fatal("runTests() passed = true, want false")
-	}
-	if output != verifierTimeoutOutput {
-		t.Fatalf("runTests() output = %q, want %q", output, verifierTimeoutOutput)
-	}
-}
-
-func TestRunTestsReturnsCallerCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	passed, output, err := runTests(ctx, authoredTask("package solution\n"), "package solution\n", time.Second)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("runTests() error = %v, want context.Canceled", err)
-	}
-	if passed {
-		t.Fatal("runTests() passed = true, want false")
-	}
-	if output != "" {
-		t.Fatalf("runTests() output = %q, want empty", output)
-	}
-}
-
-func TestRunTestsReturnsCommandLaunchError(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-
-	passed, output, err := runTests(context.Background(), authoredTask("package solution\n"), "package solution\n", time.Second)
-	if err == nil {
-		t.Fatal("runTests() error = nil, want command-launch error")
-	}
-	if passed {
-		t.Fatal("runTests() passed = true, want false")
-	}
-	if output != "" {
-		t.Fatalf("runTests() output = %q, want empty", output)
-	}
-}
-
-func TestRunTestsRejectsInvalidInputs(t *testing.T) {
 	tests := []struct {
-		name    string
-		task    domain.Task
-		timeout time.Duration
+		name       string
+		code       string
+		wantOutput string
 	}{
 		{
-			name:    "non-positive timeout",
-			task:    authoredTask("package solution\n"),
-			timeout: 0,
+			name: "init exit",
+			code: `package solution
+
+import "os"
+
+func init() { os.Exit(0) }
+func Solve() int { return 1 }
+`,
+			wantOutput: "did not complete",
 		},
 		{
-			name:    "missing task tests",
-			task:    domain.Task{},
-			timeout: time.Second,
+			name: "embed directive",
+			code: `package solution
+
+import _ "embed"
+
+//go:embed solution_test.go
+var frozenOracle string
+
+func Solve() int { return 1 }
+`,
+			wantOutput: "go:embed",
 		},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			passed, output, err := runTests(context.Background(), tt.task, "package solution\n", tt.timeout)
-			if err == nil {
-				t.Fatal("runTests() error = nil, want validation error")
+			passed, output, err := runBundleTests(context.Background(), bundle, tt.code, 10*time.Second)
+			if err != nil {
+				t.Fatalf("runBundleTests() error = %v", err)
 			}
-			if passed {
-				t.Fatal("runTests() passed = true, want false")
-			}
-			if output != "" {
-				t.Fatalf("runTests() output = %q, want empty", output)
+			if passed || !strings.Contains(output, tt.wantOutput) {
+				t.Fatalf("runBundleTests() = (%t, %q), want failed %q", passed, output, tt.wantOutput)
 			}
 		})
 	}
 }
 
+func TestVerifierFeedbackAndTimeoutContracts(t *testing.T) {
+	buildTask := authoredTask(`package solution
+
+import "testing"
+
+func TestVerifierShouldNotRun(t *testing.T) { t.Fatal("TEST_RAN_MARKER") }
+`)
+	passed, output, err := runTests(context.Background(), buildTask, "package solution\n\nfunc Solve( {\n", 10*time.Second)
+	if err != nil || passed || !strings.Contains(output, "solution.go") || strings.Contains(output, "TEST_RAN_MARKER") {
+		t.Fatalf("build failure = (%t, %q, %v)", passed, output, err)
+	}
+
+	failureTask := authoredTask(`package solution
+
+import "testing"
+
+func TestSolve(t *testing.T) {
+	if got := Solve(2, 3); got != 5 { t.Fatalf("TEST_FAILURE_MARKER: got %d", got) }
+}
+`)
+	passed, output, err = runTests(context.Background(), failureTask, "package solution\n\nfunc Solve(left, right int) int { return left - right }\n", 10*time.Second)
+	if err != nil || passed || !strings.Contains(output, "TEST_FAILURE_MARKER") {
+		t.Fatalf("test failure = (%t, %q, %v)", passed, output, err)
+	}
+
+	malformedTask := authoredTask(`package solution
+
+func TestBroken(t *testing.T) {}
+`)
+	passed, output, err = runTests(context.Background(), malformedTask, "package solution\n\nfunc Solve() {}\n", 10*time.Second)
+	if err != nil || passed || !strings.Contains(output, "solution_test.go") {
+		t.Fatalf("malformed frozen test = (%t, %q, %v)", passed, output, err)
+	}
+
+	timeoutTask := authoredTask(`package solution
+
+import "testing"
+
+func TestSolve(t *testing.T) { Solve() }
+`)
+	passed, output, err = runTests(context.Background(), timeoutTask, "package solution\n\nfunc Solve() { for {} }\n", 5*time.Second)
+	if err != nil || passed || output != verifierTimeoutOutput {
+		t.Fatalf("timeout = (%t, %q, %v), want failed timeout feedback", passed, output, err)
+	}
+}
+
+func TestLimitedOutputTruncatesVerifierFeedback(t *testing.T) {
+	output := &limitedOutput{}
+	contents := strings.Repeat("x", maxVerifierOutputBytes+1)
+	if written, err := output.Write([]byte(contents)); err != nil || written != len(contents) {
+		t.Fatalf("limitedOutput.Write() = (%d, %v), want (%d, nil)", written, err, len(contents))
+	}
+	got := output.String()
+	if !strings.HasSuffix(got, verifierOutputTruncation) || len(got) != maxVerifierOutputBytes+len(verifierOutputTruncation) {
+		t.Fatalf("limited output = %d bytes, want capped output plus marker", len(got))
+	}
+}
+
+func TestRunTestsReturnsCallerCancellationAndInvalidInputs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	passed, output, err := runTests(ctx, authoredTask("package solution\n"), "package solution\n", time.Second)
+	if !errors.Is(err, context.Canceled) || passed || output != "" {
+		t.Fatalf("canceled runTests() = (%t, %q, %v)", passed, output, err)
+	}
+	passed, output, err = runTests(context.Background(), domain.Task{}, "package solution\n", time.Second)
+	if err == nil || passed || output != "" {
+		t.Fatalf("invalid runTests() = (%t, %q, %v), want error", passed, output, err)
+	}
+	passed, output, err = runTests(context.Background(), authoredTask("package solution\n"), "package solution\n", 0)
+	if err == nil || passed || output != "" {
+		t.Fatalf("zero-timeout runTests() = (%t, %q, %v), want error", passed, output, err)
+	}
+}
+
+func TestRunTestsReturnsCommandLaunchError(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	passed, output, err := runTests(context.Background(), authoredTask("package solution\n"), "package solution\n", time.Second)
+	if err == nil || passed || output != "" {
+		t.Fatalf("missing-go runTests() = (%t, %q, %v), want launch error", passed, output, err)
+	}
+}
+
+func sealedBundle(t *testing.T, task domain.Task) domain.VerificationBundle {
+	t.Helper()
+	bundle, err := verification.AuthoredSource(task, task.TestCode)
+	if err != nil {
+		t.Fatalf("AuthoredSource() error = %v", err)
+	}
+	return bundle
+}
+
+func candidateRequest(task domain.Task, bundle domain.VerificationBundle) CandidateRequest {
+	return CandidateRequest{Spec: task.Spec, Signature: task.Signature, Bundle: bundle}
+}
+
 func authoredTask(testCode string) domain.Task {
 	return domain.Task{TestCode: testCode}
-}
-
-type scriptedResponse struct {
-	text string
-	err  error
-}
-
-type scriptedLLM struct {
-	responses  []scriptedResponse
-	prompts    []string
-	onComplete func(prompt string)
-}
-
-func (coder *scriptedLLM) Complete(_ context.Context, promptText string) (string, error) {
-	coder.prompts = append(coder.prompts, promptText)
-	if coder.onComplete != nil {
-		coder.onComplete(promptText)
-	}
-	if len(coder.responses) == 0 {
-		return "", errors.New("unexpected completion request")
-	}
-
-	response := coder.responses[0]
-	coder.responses = coder.responses[1:]
-	return response.text, response.err
 }
 
 func repairTask() domain.Task {
@@ -1079,6 +457,7 @@ func repairTask() domain.Task {
 		Name:      "increment",
 		Spec:      "Return the input integer increased by one.",
 		Signature: "func Increment(value int) int",
+		Oracle:    domain.OracleAuthored,
 		TestCode: `package solution
 
 import "testing"
@@ -1093,23 +472,22 @@ func TestIncrement(t *testing.T) {
 	}
 }
 
-func generatedRepairTask() domain.Task {
-	task := repairTask()
-	task.Oracle = domain.OracleGenerated
-	task.TestCode = "STALE_CALLER_PROVIDED_ORACLE_MUST_NOT_BE_USED"
-	return task
+type scriptedResponse struct {
+	text string
+	err  error
 }
 
-func generatedIncrementOracle() string {
-	return `package solution
+type scriptedLLM struct {
+	responses []scriptedResponse
+	prompts   []string
+}
 
-import "testing"
-
-// F15_GENERATED_ORACLE_SOURCE_SENTINEL
-func TestIncrement(t *testing.T) {
-	if got := Increment(2); got != 3 {
-		t.Fatalf("F15_TEST_FAILURE_MARKER: Increment(2) = %d, want 3", got)
+func (model *scriptedLLM) Complete(_ context.Context, promptText string) (string, error) {
+	model.prompts = append(model.prompts, promptText)
+	if len(model.responses) == 0 {
+		return "", errors.New("unexpected completion request")
 	}
-}
-`
+	response := model.responses[0]
+	model.responses = model.responses[1:]
+	return response.text, response.err
 }
