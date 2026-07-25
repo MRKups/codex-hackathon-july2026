@@ -39,10 +39,10 @@ Do not widen those APIs to “make something easier.” That would invalidate th
 ## Browser flow
 
 ```text
-editable preset or user-written spec + required Go signature
+saved task template (name + spec + confirmed Go signature)
                   │
                   ▼
- test-writer model (task-specific spec + signature + checked-in Rulebook)
+ test-writer model (server-loaded spec + signature + checked-in Rulebook)
                   │
                   ▼
        parse/preflight generated solution_test.go
@@ -61,11 +61,13 @@ editable preset or user-written spec + required Go signature
                   └── pass → terminal result
 ```
 
-The browser submits only an optional name, spec, signature, two configured model IDs, and a
-non-empty browser-generated idempotency token. It cannot submit `solution_test.go`, a provider
-endpoint/key, bundle source, or an oracle-mode override. Retrying the same token returns the
-original run ID rather than starting a second run. Every browser run is generated-oracle mode.
-Preset buttons simply fill the same editable inputs; they never start a run automatically.
+The authoring browser saves only a stable template ID, display name, specification, and confirmed
+signature in project-root `templates/<id>/template.json`. The launch browser submits only a
+server-loaded template ID, two configured model IDs, and a non-empty browser-generated idempotency
+token. It cannot submit `solution_test.go`, a provider endpoint/key, bundle source, or an
+oracle-mode override. Retrying the same token returns the original run ID rather than starting a
+second run. Every browser run is generated-oracle mode. Template edits cannot change a run because
+each snapshot carries the selected template ID/content digest plus its own task/bundle evidence.
 
 ## Task contract
 
@@ -276,6 +278,7 @@ one live run at a time to avoid accidental parallel provider cost. Its snapshot 
   counts, final review verdict, and bounded finding summaries for generated runs);
 - selected code-writer and test-writer model IDs, with the server-configured reviewer recorded in
   oracle evidence;
+- optional source-free template ID and canonical content digest, outside the verification bundle;
 - candidate attempts and capped combined verifier output;
 - lifecycle stage, timestamps, deadline, status, and error text.
 
@@ -304,6 +307,7 @@ candidates and provider wrapper replies.
 | `-oracle-attempts` | Generated test candidates allowed before `oraclefailed`. |
 | `-attempts` | Candidate-code attempts after an oracle is frozen. |
 | `-run-timeout` | Entire browser run, across tester, coder, and Go work. |
+| `-templates-dir` | Project-root directory for source-free saved task templates. |
 
 `LLM_MODEL` remains required. `LLM_MODELS` is a local comma-separated browser allowlist.
 `LLM_MODEL_CODER` and `LLM_MODEL_TESTER` select defaults and fall back to `LLM_MODEL`.
@@ -316,8 +320,6 @@ behavior change, not an implicit transport detail.
 ## Deferred work
 
 - F5: prompt tuning on a handful of real tasks.
-- F6: a source-free project-root `templates/` repository for persisted task-template inputs.
-- F27: separate template authoring, template launch, and run-analysis browser routes.
 - F18: optional persistent/varied failure classification.
 - F10/F11/F13/F14: diffs, stronger oracle research, SSE, and persistence.
 - C2: transport/retry hardening before repeated external or production use.

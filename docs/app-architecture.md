@@ -26,9 +26,9 @@ The non-negotiable invariants are structural:
 2. `prompt.FirstPrompt` and `prompt.RepairPrompt` have no test-source parameter.
 3. `oracle.Resolver.Resolve` completes before the first coder call and freezes one accepted
    bundle.
-4. The browser cannot submit test source or an oracle-mode override. It submits only task text,
-   signature, and safe model selections. The server constructs `OracleGenerated` for every
-   browser run.
+4. The authoring browser cannot submit test source or an oracle-mode override; it saves only
+   source-free template data. The launch browser selects a server-loaded template and safe model
+   selections. The server constructs `OracleGenerated` for every browser run.
 
 ## What a green run means
 
@@ -68,7 +68,7 @@ factory, creates the allowed model catalog, constructs the checked-in Rulebook p
 oracle resolver and candidate executor, sets role defaults, injects presets, and wires `server`
 to `run`. No lower package imports an upper package.
 
-## Modular composition rule (F24–F25 implemented; F26 planned)
+## Modular composition rule (F24–F26 implemented)
 
 “Plug-and-play” here means explicit, small replacement seams—not a dynamically registered
 pipeline whose ordering is hard to audit. The current component direction is:
@@ -124,7 +124,8 @@ does not create verification evidence.
 | `internal/oracle` | Pre-freeze source resolution: checked-in Rulebook guidance, blind source authoring, structural admission, one bounded review/revision pass, sealing, and generic resolution evidence. |
 | `internal/repair` | `Executor` boundary plus the default candidate generation, source-free Go verification, retry limits, and generic feedback against an already sealed bundle. |
 | `internal/run` | Bounded asynchronous runs, generic resolution-contract validation, snapshots, lifecycle phase, cancellation, and one-live-run guard. |
-| `internal/server` | Strict JSON API plus the embedded vanilla-JS page. |
+| `internal/template` | Concrete source-free filesystem repository for persisted authoring inputs. |
+| `internal/server` | Strict JSON API plus embedded vanilla-JS template, launch, and evidence pages. |
 
 ## Provider and model configuration
 
@@ -297,64 +298,67 @@ provider/verifier result and are never recast as candidate failures.
 ## HTTP contract
 
 ```text
-GET  /setup                 → configured model IDs, role defaults, editable presets
-POST /signature-draft       → syntax-valid signature draft only; never starts a run
-POST /run                   → accepts task input, returns 202 {"id":"run_..."}
-POST /run/{id}/cancel       → requests cancellation of a live run
-GET  /run/{id}              → live Run snapshot
-GET  /                      → embedded browser page
+GET  /templates             → template library page
+GET  /templates/new         → focused template authoring page
+GET  /templates/{id}        → focused template editing page
+GET  /runs                  → template launch/current-process run list page
+GET  /runs/{id}             → stable run-analysis page
+GET  /api/templates         → source-free template library JSON
+POST /api/templates         → create one source-free template
+GET  /api/templates/{id}    → load one template
+PUT  /api/templates/{id}    → atomically update one template
+POST /api/signature-draft   → syntax-valid signature draft only; never starts a run
+POST /api/templates/{id}/runs → loads a template server-side and returns 202 {"id":"run_..."}
+GET  /api/runs              → current-process run snapshots
+GET  /api/runs/{id}         → one live Run snapshot
+POST /api/runs/{id}/cancel  → requests cancellation of a live run
 ```
 
-The request body for `POST /run` is exactly:
+The request body for `POST /api/templates/{id}/runs` is exactly:
 
 ```json
 {
   "requestId": "browser-generated-idempotency-token",
-  "name": "optional label",
-  "spec": "required behaviour",
-  "signature": "func Solve(input string) (string, error)",
   "coderModel": "configured-id",
   "testerModel": "configured-id"
 }
 ```
 
 The browser creates a non-empty `requestId`; retrying it returns the same run ID and cannot start
-a second run. The server uses `DisallowUnknownFields`, caps body/field size, validates one
-type-valid bodyless function signature, and rejects model IDs outside the catalog. `testCode`, a
-bundle, and an oracle-mode override are therefore impossible request fields. HTTP responses are
-`Cache-Control: no-store`; terminal cancel or concurrent-start conflicts return `409`.
+a second run. The server uses `DisallowUnknownFields`, caps bodies/fields, and rejects model IDs
+outside the catalog. The repository independently validates template IDs, data bounds, and the
+bodyless signature. `testCode`, a bundle, and an oracle-mode override are impossible request
+fields. HTTP responses are `Cache-Control: no-store`; terminal cancel or concurrent-start
+conflicts return `409`.
 
 ## Browser behavior
 
 The page is a single embedded `index.html`. It uses `textContent`/DOM nodes for all provider and
-verifier data, never HTML insertion. A compact form sits above the existing comparison layout:
+verifier data, never HTML insertion. The spartan multi-page workflow separates concerns:
 
-- Preset buttons populate editable task inputs without starting a run.
-- The signature-draft action uses the selected test-writer model, returns a syntax-valid proposal,
-  and requires an explicit browser action before it changes the editable signature.
-- The active run locks the form and exposes its role models.
-- The verification panel moves from pending to frozen source before code appears and names its
-  origin, manifest version, and digest.
-- Candidate / capped feedback / later candidate remain side by side, with selectors for attempts.
-- Polling is bound to a run ID plus generation, so late responses cannot overwrite another run.
-- The page retains polling after ambiguous transport failure and offers cancellation.
+- `/templates` lists templates; `/templates/new` and `/templates/{id}` author only name, spec,
+  and signature. Signature drafting requires explicit application.
+- `/runs` displays the selected template read-only, limits choices to configured coder/tester
+  models, and starts no work until an explicit launch.
+- `/runs/{id}` polls one evidence record, supports cancellation while live, and exposes frozen
+  oracle source, manifest/digests, attempts, capped output, and final JSON download.
 - Downloaded JSON is the final accepted-evidence snapshot; rejected oracle candidates and raw
   provider wrapper replies are not retained, and there is no disk persistence yet.
 
-## Planned task-template workflow (F6/F27)
+## Task-template workflow (F6/F27)
 
-The current page is a temporary single-screen workflow. F6 introduces a source-free,
+F6 introduced a source-free,
 project-root `templates/` repository, manually constructed at `cmd/repair` and injected into
 `server`. A template is not a run and is not verification evidence: it contains only a stable ID,
 display name, specification, and user-confirmed signature. It has no test source, expected value,
 Rulebook material, model selection, provider configuration, oracle mode, or bundle. The repository
 does not import `run`, `oracle`, or `repair`; `server` loads a selected template, constructs the
-same `OracleGenerated` task used for free-form browser input, and starts the existing store.
+same generated `OracleGenerated` task, and starts the existing store.
 
 F27 replaces the single document with explicit embedded routes for the template library and
 authoring pages, the template-launch page, and a stable per-run analysis page. Model selection is
 made only when launching a run; a saved template stays provider-agnostic. The run snapshot copies
-the submitted task as it does today and will carry an optional template ID/content digest for
+the submitted task as it does today and carries an optional template ID/content digest for
 provenance. Editing a template therefore cannot alter an already-started or historical run.
 Template files persist across restarts, while run snapshots remain in memory until a separate
 persistence decision; final downloaded JSON remains the portable evidence record. Every browser

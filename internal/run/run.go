@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -66,6 +67,14 @@ type Roles struct {
 	ReviewerModel string
 }
 
+// TemplateProvenance identifies the immutable source-free template used to start a browser run.
+// It remains outside the verification manifest because template persistence is authoring input,
+// not executable oracle evidence.
+type TemplateProvenance struct {
+	ID     string `json:"id"`
+	Digest string `json:"digest"`
+}
+
 // Run is the JSON snapshot consumed by the browser. TestCode is the accepted frozen oracle
 // shown to the viewer; Repair never passes it to the coder prompt builders.
 type Run struct {
@@ -79,6 +88,7 @@ type Run struct {
 	TestCode       string                      `json:"testCode"`
 	CoderModel     string                      `json:"coderModel"`
 	TesterModel    string                      `json:"testerModel"`
+	Template       TemplateProvenance          `json:"template"`
 	MaxAttempts    int                         `json:"maxAttempts"`
 	Status         Status                      `json:"status"`
 	Stage          Phase                       `json:"stage"`
@@ -136,8 +146,18 @@ func NewStore(config Config, resolver oracle.Resolver, executor repair.Executor)
 // already-resolved role clients instead of holding a global coder, which makes model selection
 // part of the immutable record for this particular run.
 func (store *Store) StartRun(task domain.Task, roles Roles) (string, error) {
+	return store.StartRunWithTemplate(task, roles, TemplateProvenance{})
+}
+
+// StartRunWithTemplate starts a run whose task was loaded from a source-free template. The
+// caller supplies plain provenance values rather than a template dependency, preserving package
+// direction from server to run.
+func (store *Store) StartRunWithTemplate(task domain.Task, roles Roles, provenance TemplateProvenance) (string, error) {
 	mode, err := validateStart(task, roles)
 	if err != nil {
+		return "", err
+	}
+	if err := validateTemplateProvenance(provenance); err != nil {
 		return "", err
 	}
 	task.Oracle = mode
@@ -171,6 +191,7 @@ func (store *Store) StartRun(task domain.Task, roles Roles) (string, error) {
 		TestCode:       testCode,
 		CoderModel:     roles.CoderModel,
 		TesterModel:    roles.TesterModel,
+		Template:       provenance,
 		MaxAttempts:    store.config.MaxAttempts,
 		Status:         StatusRunning,
 		Stage:          PhaseStarting,
@@ -184,6 +205,45 @@ func (store *Store) StartRun(task domain.Task, roles Roles) (string, error) {
 
 	go store.execute(ctx, cancel, id, task, roles)
 	return id, nil
+}
+
+func validateTemplateProvenance(provenance TemplateProvenance) error {
+	id := strings.TrimSpace(provenance.ID)
+	digest := strings.TrimSpace(provenance.Digest)
+	if id == "" && digest == "" {
+		return nil
+	}
+	if id == "" || digest == "" {
+		return errors.New("template provenance requires both ID and digest")
+	}
+	if len(id) > 64 || len(digest) != 64 {
+		return errors.New("template provenance is invalid")
+	}
+	for _, character := range digest {
+		if (character >= 'a' && character <= 'f') || (character >= '0' && character <= '9') {
+			continue
+		}
+		return errors.New("template provenance is invalid")
+	}
+	return nil
+}
+
+// ListRuns returns immutable snapshots in stable chronological order for the current process.
+func (store *Store) ListRuns() []Run {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	runs := make([]Run, 0, len(store.runs))
+	for _, stored := range store.runs {
+		snapshot := *stored
+		snapshot.Verification = (domain.VerificationBundle{Manifest: stored.Verification}).Clone().Manifest
+		snapshot.OracleEvidence = stored.OracleEvidence.Clone()
+		snapshot.Attempts = append([]domain.Attempt(nil), stored.Attempts...)
+		runs = append(runs, snapshot)
+	}
+	sort.Slice(runs, func(left, right int) bool {
+		return runs[left].StartedAt.After(runs[right].StartedAt)
+	})
+	return runs
 }
 
 func validateStart(task domain.Task, roles Roles) (domain.OracleMode, error) {

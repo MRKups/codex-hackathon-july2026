@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Author Template · Test Verifier</title><link rel="stylesheet" href="/assets/styles.css"></head>
+  <body>
+    <main>
+      <header class="header"><div><h1 id="title">New task template</h1><p class="muted">A template holds only its name, specification, and confirmed Go signature. It never contains verifier source.</p></div><nav class="nav"><a href="/templates">Templates</a><a href="/runs">Runs</a></nav></header>
+      <form id="form" class="panel grid"><label id="idLabel">Stable ID<input id="id" autocomplete="off" placeholder="split-cents" required></label><label>Display name<input id="name" autocomplete="off" required></label><label>Specification<textarea id="spec" required></textarea></label><div class="grid two"><label>Confirmed Go signature<input id="signature" autocomplete="off" placeholder="func SplitCents(total, recipients int) ([]int, error)" required></label><label>Draft with configured test-writer<select id="tester"></select></label></div><div class="actions"><button id="draft" type="button">Suggest signature</button><button id="useDraft" type="button" class="hidden">Use draft</button><button id="save" type="submit" class="primary">Save template</button></div><p id="notice" class="notice"></p></form>
+    </main>
+    <script>
+      const parts = location.pathname.split('/').filter(Boolean); const isNew = parts[1] === 'new'; const templateID = isNew ? '' : decodeURIComponent(parts[1] || '');
+      const form = document.querySelector('#form'), id = document.querySelector('#id'), name = document.querySelector('#name'), spec = document.querySelector('#spec'), signature = document.querySelector('#signature'), tester = document.querySelector('#tester'), notice = document.querySelector('#notice'), draft = document.querySelector('#draft'), useDraft = document.querySelector('#useDraft'), save = document.querySelector('#save');
+      let draftedSignature = '', draftSpec = '';
+      function setNotice(message, bad) { notice.textContent = message; notice.className = 'notice' + (bad ? ' error' : ''); }
+      async function json(url, options) { const response = await fetch(url, options); const value = await response.json(); if (!response.ok) throw new Error(value.error || 'Request failed.'); return value; }
+      async function load() {
+        try {
+          const setup = await json('/api/setup');
+          tester.replaceChildren(...setup.models.map(model => { const option = document.createElement('option'); option.value = model.id; option.textContent = model.id; if (model.id === setup.defaults.testerModel) option.selected = true; return option; }));
+          if (!isNew) { const template = await json('/api/templates/' + encodeURIComponent(templateID)); document.querySelector('#title').textContent = 'Edit task template'; id.value = template.id; id.disabled = true; name.value = template.name; spec.value = template.spec; signature.value = template.signature; }
+        } catch (error) { setNotice(error.message, true); save.disabled = true; draft.disabled = true; }
+      }
+      draft.addEventListener('click', async () => { setNotice('Drafting a syntax-valid signature…'); draft.disabled = true; try { const result = await json('/api/signature-draft', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({spec: spec.value, testerModel: tester.value})}); draftedSignature = result.signature; draftSpec = spec.value; useDraft.classList.remove('hidden'); setNotice('Draft is syntax-valid but semantically unverified. Review it, then choose Use draft.'); } catch (error) { setNotice(error.message, true); } finally { draft.disabled = false; } });
+      useDraft.addEventListener('click', () => { if (draftSpec !== spec.value) { setNotice('The specification changed; request another draft.', true); return; } signature.value = draftedSignature; useDraft.classList.add('hidden'); setNotice('Draft copied into the editable signature field.'); });
+      form.addEventListener('submit', async event => { event.preventDefault(); save.disabled = true; setNotice('Saving template…'); const body = {name: name.value, spec: spec.value, signature: signature.value}; try { let target; if (isNew) { body.id = id.value; target = await json('/api/templates', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)}); } else { target = await json('/api/templates/' + encodeURIComponent(templateID), {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)}); } location.assign('/templates/' + encodeURIComponent(target.id)); } catch (error) { setNotice(error.message, true); save.disabled = false; } });
+      load();
+    </script>
+  </body>
+</html>

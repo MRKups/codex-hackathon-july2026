@@ -173,7 +173,8 @@ go run ./cmd/repair -serve \
   -attempts 3 \
   -oracle-attempts 2 \
   -verifier-timeout 10s \
-  -run-timeout 2m30s
+  -run-timeout 2m30s \
+  -templates-dir templates
 ```
 
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080). Use `-addr 127.0.0.1:8090` for another
@@ -181,18 +182,21 @@ local address. Press `Ctrl-C` to stop the server.
 
 To use it:
 
-1. Click a preset or enter a task name and specification. You may request a syntax-valid signature
-   draft from the selected test-writer model, then explicitly apply or edit it; drafting never
-   starts a run.
-2. Choose locally configured code-writer and test-writer models. The server uses its configured
-   reviewer model, falling back to the test-writer model when unset.
-3. Click **Start verification**.
+1. Open **Templates**, create a source-free task template, and save its name, specification, and
+   confirmed Go signature under `templates/<id>/template.json`. You may request a syntax-valid
+   signature draft from the selected test-writer model, then explicitly apply or edit it; drafting
+   never starts a run.
+2. Open **Runs**, select the saved template, and choose locally configured code-writer and
+   test-writer models. The server uses its configured reviewer model, falling back to the
+   test-writer model when unset.
+3. Start the generated-oracle run and follow its stable run-detail URL.
 4. Inspect the pending oracle stage, then the frozen source, manifest, digest, candidate
    attempts, and capped feedback.
 5. Download the final run JSON when the run reaches a terminal state.
 
 Only one browser run may be live at a time. Browser runs are in memory and disappear when the
-server restarts. A browser-generated idempotency token makes a lost start response safe to retry.
+server restarts; templates remain in the project-root folder. A browser-generated idempotency token
+makes a lost start response safe to retry.
 The limits have separate jobs:
 
 | Limit | Scope |
@@ -202,6 +206,7 @@ The limits have separate jobs:
 | `-oracle-attempts` | Generated-oracle source attempts before `oraclefailed`; authored-source failures are configuration/infrastructure failures. |
 | `-attempts` | Candidate attempts after the bundle is frozen. |
 | `-run-timeout` | The whole browser run. |
+| `-templates-dir` | Project-root directory used for source-free saved task templates. |
 
 A cancellation, timeout, `oraclefailed`, or infrastructure failure is not a verdict that a
 candidate implementation is wrong.

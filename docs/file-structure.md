@@ -15,7 +15,7 @@ mechanism and are not a second product name.
 ├── go.sum
 ├── cmd/
 │   └── repair/
-│       ├── main.go               # Composition root, flags, model roles, browser presets
+│       ├── main.go               # Composition root, flags, model roles, template-root wiring
 │       └── main_test.go
 ├── challenges/
 │   └── pi-prime-chunks.md         # Standalone challenge specification; not runtime verifier code
@@ -44,6 +44,9 @@ mechanism and are not a second product name.
 │   │       ├── client.go         # Official SDK Chat Completions adapter
 │   │       ├── client_test.go
 │   │       └── live_test.go      # Explicit `integration`-tagged provider smoke test
+│   ├── template/
+│   │   ├── template.go           # Source-free task-template repository
+│   │   └── template_test.go      # Storage, validation, and safety tests
 │   ├── prompt/
 │   │   ├── prompt.go             # FirstPrompt, RepairPrompt, TestPrompt, ExtractGoCode
 │   │   └── prompt_test.go
@@ -58,9 +61,14 @@ mechanism and are not a second product name.
 │   │   ├── run.go                # In-memory per-run state, phases, cancel, active-run guard
 │   │   └── run_test.go
 │   └── server/
-│       ├── assets.go             # Embeds index.html
-│       ├── index.html            # One plain HTML/CSS/JS interactive page
-│       ├── server.go             # /setup, /run, /run/{id}, cancel handlers
+│       ├── assets.go             # Embeds and serves explicit static routes/assets
+│       ├── templates.html        # Template library page
+│       ├── template.html         # New/edit template authoring page
+│       ├── runs.html             # Template launch and current-process runs page
+│       ├── run.html              # One immutable run-analysis page
+│       ├── styles.css            # Shared spartan browser styling
+│       ├── index.html            # Superseded one-screen page retained as history
+│       ├── server.go             # /api template/run handlers and page routes
 │       └── server_test.go
 ├── docs/
 │   ├── go-repair-loop.md         # Test Verifier system design and behavior contract
@@ -94,8 +102,9 @@ mechanism and are not a second product name.
   source and compiled verification-bundle source exist in the in-memory run snapshot and may be
   included in downloaded JSON, but are never written back into `templates/` or another repository
   task file.
-- **Browser submissions** contain a name, spec, signature, and model IDs. They never contain test
-  source, a bundle, or provider credentials. Every browser submission follows the blind generated
+- **Browser authoring submissions** contain only a template ID, name, spec, and signature;
+  browser launch submissions contain a server-loaded template ID plus model IDs. Neither contains
+  test source, a bundle, or provider credentials. Every browser launch follows the blind generated
   source path.
 - **Downloaded run JSON** is a final accepted-evidence snapshot, not a repository artifact,
   persistent event log, or record of rejected oracle candidates.
@@ -104,9 +113,9 @@ mechanism and are not a second product name.
 
 `internal/oracle/` and the candidate-side `repair.Executor` are explicitly wired at `cmd/repair`,
 not a plugin registry, task-profile directory, or generic workflow framework. F25's bounded
-reviewer/revision pass lives inside `internal/oracle`. F6 will add `internal/template/` plus a
-project-root `templates/` directory for source-free task-template JSON only; it is not an
-authored-oracle loader and does not store generated test source. F27 will replace the single
-`index.html` with a small set of embedded authoring, launch, and run-analysis documents plus only
-their shared static assets. SQLite persistence, SSE, attempt diffs, and stronger-oracle research
+reviewer/revision pass lives inside `internal/oracle`. `internal/template/` owns a project-root
+`templates/` directory for source-free task-template JSON only; it is not an authored-oracle
+loader and does not store generated test source. The browser uses explicit embedded authoring,
+launch, and run-analysis documents plus one shared stylesheet. SQLite persistence, SSE, attempt
+diffs, and stronger-oracle research
 are still stretch work. Do not create them as scaffolding before there is a concrete tracker item.

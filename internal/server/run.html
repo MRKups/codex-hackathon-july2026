@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Run Evidence · Test Verifier</title><link rel="stylesheet" href="/assets/styles.css"></head>
+  <body>
+    <main>
+      <header class="header"><div><h1>Run evidence</h1><p class="muted">A green result means the candidate satisfied this fixed blind verifier. It is not a proof of arbitrary correctness.</p></div><nav class="nav"><a href="/templates">Templates</a><a href="/runs">Runs</a></nav></header>
+      <section class="panel"><div class="actions"><h2 id="title">Loading run…</h2><button id="cancel" class="hidden">Cancel</button><button id="download" class="hidden">Download JSON</button></div><p id="status" class="notice"></p><div id="summary" class="meta"></div></section>
+      <section class="panel"><h2>Frozen verifier</h2><p id="oracle" class="muted">Waiting for oracle resolution…</p><pre id="testCode"></pre></section>
+      <section class="panel"><h2>Candidate attempts</h2><div id="attempts" class="list"></div></section>
+    </main>
+    <script>
+      const id = decodeURIComponent(location.pathname.split('/').filter(Boolean)[1] || ''); const title = document.querySelector('#title'), status = document.querySelector('#status'), summary = document.querySelector('#summary'), oracle = document.querySelector('#oracle'), testCode = document.querySelector('#testCode'), attempts = document.querySelector('#attempts'), cancel = document.querySelector('#cancel'), download = document.querySelector('#download'); let current;
+      function element(tag, text, className) { const value = document.createElement(tag); value.textContent = text; if (className) value.className = className; return value; }
+      function terminal(run) { return run.status !== 'running'; }
+      function render(run) { current = run; title.textContent = run.task + ' · ' + run.id; status.textContent = run.status + (run.error ? ': ' + run.error : ''); status.className = 'notice ' + (run.status === 'passed' ? 'good' : run.status === 'running' ? '' : 'error'); summary.replaceChildren(element('span', 'Template: ' + (run.template.id || 'none'), 'id'), element('span', 'Coder: ' + run.coderModel, 'id'), element('span', 'Tester: ' + run.testerModel, 'id'), element('span', 'Stage: ' + run.stage, 'id')); oracle.textContent = run.testCode ? 'Frozen ' + run.oracle + ' oracle · bundle ' + run.verification.digest : 'The oracle is being generated and reviewed before candidate code exists.'; testCode.textContent = run.testCode || ''; cancel.classList.toggle('hidden', terminal(run)); download.classList.toggle('hidden', !terminal(run)); attempts.replaceChildren(); if (!run.attempts.length) { attempts.textContent = 'No candidate attempt exists until the oracle is frozen.'; } for (const attempt of run.attempts) { const details = document.createElement('details'); details.open = attempt.n === run.attempts.length; const heading = document.createElement('summary'); heading.textContent = 'Attempt ' + attempt.n + ' · ' + (attempt.passed ? 'passed' : 'failed'); const code = element('pre', attempt.code); const output = element('pre', attempt.output || '(no verifier output)'); details.append(heading, element('h3', 'Candidate'), code, element('h3', 'Verifier output'), output); attempts.append(details); } }
+      async function poll() { try { const response = await fetch('/api/runs/' + encodeURIComponent(id)); const run = await response.json(); if (!response.ok) throw new Error(run.error || 'Could not load run.'); render(run); if (!terminal(run)) setTimeout(poll, 800); } catch (error) { status.textContent = error.message; status.className = 'notice error'; } }
+      cancel.addEventListener('click', async () => { cancel.disabled = true; try { await fetch('/api/runs/' + encodeURIComponent(id) + '/cancel', {method: 'POST'}); } finally { poll(); } });
+      download.addEventListener('click', () => { const blob = new Blob([JSON.stringify(current, null, 2)], {type: 'application/json'}); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = current.id + '.json'; link.click(); URL.revokeObjectURL(link.href); });
+      poll();
+    </script>
+  </body>
+</html>

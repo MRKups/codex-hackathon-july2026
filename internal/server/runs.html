@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Runs · Test Verifier</title><link rel="stylesheet" href="/assets/styles.css"></head>
+  <body>
+    <main>
+      <header class="header"><div><h1>Runs</h1><p class="muted">Choose a saved task template, then start one immutable generated-oracle verification run.</p></div><nav class="nav"><a href="/templates">Templates</a><a href="/runs">Runs</a></nav></header>
+      <section class="panel grid"><h2>Start a run</h2><label>Task template<select id="template"></select></label><div id="task" class="panel hidden"><h3 id="name"></h3><p id="signature" class="id"></p><pre id="spec"></pre></div><div class="grid two"><label>Code-writer model<select id="coder"></select></label><label>Test-writer model<select id="tester"></select></label></div><div class="actions"><button id="start" class="primary">Start generated-oracle run</button></div><p id="notice" class="notice"></p></section>
+      <section class="panel"><h2>Runs in this server process</h2><div id="runs" class="list"></div></section>
+    </main>
+    <script>
+      const templateSelect = document.querySelector('#template'), coder = document.querySelector('#coder'), tester = document.querySelector('#tester'), task = document.querySelector('#task'), taskName = document.querySelector('#name'), signature = document.querySelector('#signature'), spec = document.querySelector('#spec'), start = document.querySelector('#start'), notice = document.querySelector('#notice'), runs = document.querySelector('#runs');
+      let templates = [];
+      function setNotice(message, bad) { notice.textContent = message; notice.className = 'notice' + (bad ? ' error' : ''); }
+      function token() { return crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2); }
+      async function json(url, options) { const response = await fetch(url, options); const value = await response.json(); if (!response.ok) throw new Error(value.error || 'Request failed.'); return value; }
+      function renderTask() { const selected = templates.find(value => value.id === templateSelect.value); if (!selected) { task.classList.add('hidden'); start.disabled = true; return; } taskName.textContent = selected.name; signature.textContent = selected.signature; spec.textContent = selected.spec; task.classList.remove('hidden'); start.disabled = false; }
+      function renderRuns(items) { runs.replaceChildren(); if (!items.length) { runs.textContent = 'No runs have been started in this process.'; return; } for (const item of items) { const link = document.createElement('a'); link.className = 'item'; link.href = '/runs/' + encodeURIComponent(item.id); const heading = document.createElement('h3'); heading.textContent = item.task; const state = document.createElement('p'); state.className = 'status'; state.textContent = item.status + ' · ' + item.id; const detail = document.createElement('p'); detail.className = 'muted'; detail.textContent = item.template.id ? 'Template ' + item.template.id : 'Legacy run'; link.append(heading, state, detail); runs.append(link); } }
+      async function load() { try { const [setup, library, history] = await Promise.all([json('/api/setup'), json('/api/templates'), json('/api/runs')]); templates = library; const desired = new URLSearchParams(location.search).get('template'); templateSelect.replaceChildren(...templates.map(value => { const option = document.createElement('option'); option.value = value.id; option.textContent = value.name + ' (' + value.id + ')'; if (value.id === desired) option.selected = true; return option; })); for (const select of [coder, tester]) select.replaceChildren(...setup.models.map(model => { const option = document.createElement('option'); option.value = model.id; option.textContent = model.id; if (model.id === (select === coder ? setup.defaults.coderModel : setup.defaults.testerModel)) option.selected = true; return option; })); renderTask(); renderRuns(history); if (!templates.length) setNotice('Create a task template before starting a run.', true); } catch (error) { setNotice(error.message, true); start.disabled = true; } }
+      templateSelect.addEventListener('change', renderTask);
+      start.addEventListener('click', async () => { if (!templateSelect.value) return; start.disabled = true; setNotice('Starting run…'); try { const result = await json('/api/templates/' + encodeURIComponent(templateSelect.value) + '/runs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({requestId: token(), coderModel: coder.value, testerModel: tester.value})}); location.assign('/runs/' + encodeURIComponent(result.id)); } catch (error) { setNotice(error.message, true); start.disabled = false; } });
+      load();
+    </script>
+  </body>
+</html>

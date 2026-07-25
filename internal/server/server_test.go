@@ -17,6 +17,7 @@ import (
 	"codex-hackathon-july2026/internal/oracle"
 	"codex-hackathon-july2026/internal/repair"
 	"codex-hackathon-july2026/internal/run"
+	"codex-hackathon-july2026/internal/template"
 )
 
 func TestNewServesInteractiveGeneratedOracleAPI(t *testing.T) {
@@ -34,11 +35,13 @@ func TestNewServesInteractiveGeneratedOracleAPI(t *testing.T) {
 
 	page := httptest.NewRecorder()
 	handler.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/", nil))
-	if page.Code != http.StatusOK {
-		t.Fatalf("GET / status = %d, want %d", page.Code, http.StatusOK)
+	if page.Code != http.StatusSeeOther || page.Header().Get("Location") != "/templates" {
+		t.Fatalf("GET / = status %d location %q, want redirect to /templates", page.Code, page.Header().Get("Location"))
 	}
-	if !strings.Contains(page.Body.String(), "Configure a run") {
-		t.Fatalf("GET / body did not contain interactive task editor")
+	templatesPage := httptest.NewRecorder()
+	handler.ServeHTTP(templatesPage, httptest.NewRequest(http.MethodGet, "/templates", nil))
+	if templatesPage.Code != http.StatusOK || !strings.Contains(templatesPage.Body.String(), "Task templates") {
+		t.Fatalf("GET /templates did not serve the template library: status %d body %s", templatesPage.Code, templatesPage.Body.String())
 	}
 	setupPage := httptest.NewRecorder()
 	handler.ServeHTTP(setupPage, httptest.NewRequest(http.MethodGet, "/setup", nil))
@@ -326,6 +329,105 @@ func TestRunAPICancelsActiveTestWriterAndRejectsSecondStart(t *testing.T) {
 	}
 }
 
+func TestTemplateAPIsAndTemplateBackedRun(t *testing.T) {
+	handler := newHandler(t, providerFor(t, func(model string) string {
+		switch model {
+		case "test-model":
+			return incrementTestCode
+		case "code-model":
+			return correctIncrementCode
+		default:
+			t.Fatalf("unexpected model %q", model)
+			return ""
+		}
+	}))
+
+	created := templateRequest(t, handler, http.MethodPost, "/api/templates", `{"id":"increment","name":"Increment","spec":"Return the input integer increased by one.","signature":"func Increment(value int) int"}`, http.StatusCreated)
+	if created.ID != "increment" || created.Digest == "" {
+		t.Fatalf("created template = %#v", created)
+	}
+	listed := httptest.NewRecorder()
+	handler.ServeHTTP(listed, httptest.NewRequest(http.MethodGet, "/api/templates", nil))
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"id":"increment"`) {
+		t.Fatalf("GET /api/templates = status %d body %s", listed.Code, listed.Body.String())
+	}
+	loaded := templateRequest(t, handler, http.MethodGet, "/api/templates/increment", "", http.StatusOK)
+	if loaded != created {
+		t.Fatalf("loaded template = %#v, want %#v", loaded, created)
+	}
+	updated := templateRequest(t, handler, http.MethodPut, "/api/templates/increment", `{"name":"Increment safely","spec":"Return the input integer increased by one without panicking.","signature":"func Increment(value int) int"}`, http.StatusOK)
+	if updated.ID != created.ID || updated.Digest == created.Digest {
+		t.Fatalf("updated template = %#v, want same ID and changed digest", updated)
+	}
+
+	start := httptest.NewRecorder()
+	startBody := `{"requestId":"template_run_001","coderModel":"code-model","testerModel":"test-model"}`
+	handler.ServeHTTP(start, httptest.NewRequest(http.MethodPost, "/api/templates/increment/runs", strings.NewReader(startBody)))
+	if start.Code != http.StatusAccepted {
+		t.Fatalf("POST template run = %d: %s", start.Code, start.Body.String())
+	}
+	var started startResponse
+	if err := json.NewDecoder(start.Body).Decode(&started); err != nil {
+		t.Fatalf("decode template run: %v", err)
+	}
+	got := waitForRun(t, handler, started.ID)
+	if got.Status != run.StatusPassed || got.Template.ID != updated.ID || got.Template.Digest != updated.Digest {
+		t.Fatalf("template-backed run = %#v, want passed snapshot with template provenance", got)
+	}
+
+	replayed := httptest.NewRecorder()
+	handler.ServeHTTP(replayed, httptest.NewRequest(http.MethodPost, "/api/templates/increment/runs", strings.NewReader(startBody)))
+	if replayed.Code != http.StatusAccepted || !strings.Contains(replayed.Body.String(), started.ID) {
+		t.Fatalf("template run replay = %d: %s", replayed.Code, replayed.Body.String())
+	}
+	unknown := httptest.NewRecorder()
+	handler.ServeHTTP(unknown, httptest.NewRequest(http.MethodPost, "/api/templates/missing/runs", strings.NewReader(startBody)))
+	if unknown.Code != http.StatusNotFound {
+		t.Fatalf("unknown template start = %d, want 404", unknown.Code)
+	}
+}
+
+func TestTemplateAPIsRejectUnsafeInputAndPagesAreExplicit(t *testing.T) {
+	handler := newHandler(t, providerFor(t, func(string) string { return incrementTestCode }))
+	for _, body := range []string{
+		`{"id":"../escape","name":"Name","spec":"Return one.","signature":"func One() int"}`,
+		`{"id":"one","name":"Name","spec":"Return one.","signature":"func One() int","testCode":"forbidden"}`,
+		`{"id":"one","name":"Name","spec":"Return one.","signature":"func One() int","oracle":"authored"}`,
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/templates", strings.NewReader(body)))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("POST unsafe template = %d, want 400: %s", response.Code, response.Body.String())
+		}
+	}
+	for _, route := range []string{"/templates", "/templates/new", "/templates/increment", "/runs", "/runs/run_000001"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, route, nil))
+		if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "innerHTML") {
+			t.Fatalf("GET %s = status %d with unsafe page content", route, response.Code)
+		}
+	}
+	missing := httptest.NewRecorder()
+	handler.ServeHTTP(missing, httptest.NewRequest(http.MethodGet, "/unknown", nil))
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("GET unknown route = %d, want 404", missing.Code)
+	}
+}
+
+func templateRequest(t *testing.T, handler http.Handler, method, path, body string, wantStatus int) template.Template {
+	t.Helper()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(method, path, strings.NewReader(body)))
+	if response.Code != wantStatus {
+		t.Fatalf("%s %s = %d, want %d: %s", method, path, response.Code, wantStatus, response.Body.String())
+	}
+	var value template.Template
+	if err := json.NewDecoder(response.Body).Decode(&value); err != nil {
+		t.Fatalf("decode template response: %v", err)
+	}
+	return value
+}
+
 func TestNewRejectsIncompleteConfig(t *testing.T) {
 	if _, err := New(Config{}); err == nil {
 		t.Fatal("New(Config{}) error = nil, want validation error")
@@ -355,10 +457,15 @@ func newHandler(t *testing.T, provider llm.ClientFactory) http.Handler {
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
+	templates, err := template.New(template.Config{Root: t.TempDir()})
+	if err != nil {
+		t.Fatalf("template.New() error = %v", err)
+	}
 	handler, err := New(Config{
 		Store:         store,
 		Models:        catalog,
 		Draft:         draft.NewService(),
+		Templates:     templates,
 		ReviewerModel: "test-model",
 		Defaults: ModelDefaults{
 			CoderModel:  "code-model",

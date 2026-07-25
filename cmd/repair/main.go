@@ -18,6 +18,7 @@ import (
 	"codex-hackathon-july2026/internal/repair"
 	"codex-hackathon-july2026/internal/run"
 	"codex-hackathon-july2026/internal/server"
+	"codex-hackathon-july2026/internal/template"
 )
 
 const (
@@ -33,16 +34,18 @@ func main() {
 	var oracleAttempts int
 	var runTimeout time.Duration
 	var serve bool
+	var templatesDir string
 	var verifierTimeout time.Duration
 	flag.StringVar(&address, "addr", "127.0.0.1:8080", "address for the browser demo server")
 	flag.IntVar(&maxAttempts, "attempts", 3, "maximum number of coder attempts")
 	flag.IntVar(&oracleAttempts, "oracle-attempts", 2, "maximum generated-oracle attempts before oraclefailed")
 	flag.DurationVar(&runTimeout, "run-timeout", 150*time.Second, "maximum duration of one browser verification run")
 	flag.BoolVar(&serve, "serve", false, "serve the browser demo instead of running once in the terminal")
+	flag.StringVar(&templatesDir, "templates-dir", "templates", "project-root directory for source-free task templates")
 	flag.DurationVar(&verifierTimeout, "verifier-timeout", 10*time.Second, "timeout for one oracle preflight or candidate verification")
 	flag.Parse()
 	if flag.NArg() != 0 {
-		fmt.Fprintf(os.Stderr, "usage: %s [-serve] [-addr ADDRESS] [-attempts N] [-oracle-attempts N] [-run-timeout DURATION] [-verifier-timeout DURATION]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "usage: %s [-serve] [-addr ADDRESS] [-attempts N] [-oracle-attempts N] [-run-timeout DURATION] [-templates-dir DIRECTORY] [-verifier-timeout DURATION]\n", os.Args[0])
 		os.Exit(2)
 	}
 	if maxAttempts <= 0 {
@@ -84,7 +87,7 @@ func main() {
 		exitFailure("configuration error", err)
 	}
 	if serve {
-		serveBrowser(address, models, resolver, executor, maxAttempts, verifierTimeout, runTimeout)
+		serveBrowser(address, templatesDir, models, resolver, executor, maxAttempts, verifierTimeout, runTimeout)
 		return
 	}
 	coder, err := models.catalog.Resolve(models.coder)
@@ -123,7 +126,7 @@ func main() {
 	fmt.Printf("gave up after %d attempt(s)\n", final.N)
 }
 
-func serveBrowser(address string, models modelSettings, resolver oracle.Resolver, executor repair.Executor, maxAttempts int, verifierTimeout, runTimeout time.Duration) {
+func serveBrowser(address, templatesDir string, models modelSettings, resolver oracle.Resolver, executor repair.Executor, maxAttempts int, verifierTimeout, runTimeout time.Duration) {
 	store, err := run.NewStore(run.Config{
 		MaxAttempts: maxAttempts,
 		TestTimeout: verifierTimeout,
@@ -132,10 +135,15 @@ func serveBrowser(address string, models modelSettings, resolver oracle.Resolver
 	if err != nil {
 		exitFailure("configuration error", err)
 	}
+	templates, err := template.New(template.Config{Root: templatesDir})
+	if err != nil {
+		exitFailure("configuration error", err)
+	}
 	handler, err := server.New(server.Config{
-		Store:  store,
-		Models: models.catalog,
-		Draft:  draft.NewService(),
+		Store:     store,
+		Models:    models.catalog,
+		Draft:     draft.NewService(),
+		Templates: templates,
 		Defaults: server.ModelDefaults{
 			CoderModel:  models.coder,
 			TesterModel: models.tester,

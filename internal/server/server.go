@@ -14,6 +14,7 @@ import (
 	"codex-hackathon-july2026/internal/draft"
 	"codex-hackathon-july2026/internal/llm"
 	"codex-hackathon-july2026/internal/run"
+	"codex-hackathon-july2026/internal/template"
 )
 
 const (
@@ -44,6 +45,7 @@ type Config struct {
 	Store         *run.Store
 	Models        *llm.ModelCatalog
 	Draft         *draft.Service
+	Templates     *template.Repository
 	Defaults      ModelDefaults
 	ReviewerModel string
 	Presets       []Preset
@@ -60,6 +62,9 @@ func New(config Config) (http.Handler, error) {
 	if config.Draft == nil {
 		return nil, errors.New("signature draft service is required")
 	}
+	if config.Templates == nil {
+		return nil, errors.New("template repository is required")
+	}
 	if _, err := config.Models.Resolve(config.Defaults.CoderModel); err != nil {
 		return nil, fmt.Errorf("resolve default coder model: %w", err)
 	}
@@ -75,15 +80,159 @@ func New(config Config) (http.Handler, error) {
 		}
 	}
 
-	setup := setupResponse{
-		Models:   config.Models.Options(),
-		Defaults: config.Defaults,
-		Presets:  append([]Preset(nil), config.Presets...),
-	}
+	setup := setupResponse{Models: config.Models.Options(), Defaults: config.Defaults}
 	starts := newStartRegistry()
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /setup", func(writer http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /api/setup", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, setup)
+	})
+	mux.HandleFunc("POST /api/signature-draft", func(writer http.ResponseWriter, request *http.Request) {
+		input, err := decodeSignatureDraftRequest(writer, request)
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+			return
+		}
+		author, err := config.Models.Resolve(input.TesterModel)
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "unknown test-writer model"})
+			return
+		}
+		signature, err := config.Draft.Suggest(request.Context(), author, input.Spec)
+		if err != nil {
+			writeJSON(writer, http.StatusBadGateway, errorResponse{Error: "signature drafting failed"})
+			return
+		}
+		writeJSON(writer, http.StatusOK, signatureDraftResponse{Signature: signature, Model: input.TesterModel})
+	})
+	mux.HandleFunc("GET /api/templates", func(writer http.ResponseWriter, _ *http.Request) {
+		templates, err := config.Templates.List()
+		if err != nil {
+			writeJSON(writer, http.StatusInternalServerError, errorResponse{Error: "template library is unavailable"})
+			return
+		}
+		writeJSON(writer, http.StatusOK, templates)
+	})
+	mux.HandleFunc("POST /api/templates", func(writer http.ResponseWriter, request *http.Request) {
+		input, err := decodeTemplateCreateRequest(writer, request)
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+			return
+		}
+		created, err := config.Templates.Create(template.CreateInput(input))
+		if err != nil {
+			if errors.Is(err, template.ErrAlreadyExists) {
+				writeJSON(writer, http.StatusConflict, errorResponse{Error: err.Error()})
+				return
+			}
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(writer, http.StatusCreated, created)
+	})
+	mux.HandleFunc("GET /api/templates/{id}", func(writer http.ResponseWriter, request *http.Request) {
+		id := strings.TrimSpace(request.PathValue("id"))
+		selected, err := config.Templates.Load(id)
+		if err != nil {
+			writeTemplateError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, selected)
+	})
+	mux.HandleFunc("PUT /api/templates/{id}", func(writer http.ResponseWriter, request *http.Request) {
+		id := strings.TrimSpace(request.PathValue("id"))
+		input, err := decodeTemplateUpdateRequest(writer, request)
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+			return
+		}
+		updated, err := config.Templates.Update(id, template.UpdateInput(input))
+		if err != nil {
+			writeTemplateError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, updated)
+	})
+	mux.HandleFunc("POST /api/templates/{id}/runs", func(writer http.ResponseWriter, request *http.Request) {
+		id := strings.TrimSpace(request.PathValue("id"))
+		input, err := decodeTemplateRunRequest(writer, request)
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+			return
+		}
+		selected, err := config.Templates.Load(id)
+		if err != nil {
+			writeTemplateError(writer, err)
+			return
+		}
+		roles, err := rolesForTemplateRun(config, input)
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+			return
+		}
+
+		runID, err := starts.start(input.RequestID, func() (string, error) {
+			return config.Store.StartRunWithTemplate(taskForTemplate(selected), roles, run.TemplateProvenance{ID: selected.ID, Digest: selected.Digest})
+		})
+		if err != nil {
+			if errors.Is(err, run.ErrRunActive) {
+				writeJSON(writer, http.StatusConflict, errorResponse{Error: err.Error()})
+				return
+			}
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(writer, http.StatusAccepted, startResponse{ID: runID})
+	})
+	mux.HandleFunc("GET /api/runs", func(writer http.ResponseWriter, _ *http.Request) {
+		writeJSON(writer, http.StatusOK, config.Store.ListRuns())
+	})
+	mux.HandleFunc("POST /api/runs/{id}/cancel", func(writer http.ResponseWriter, request *http.Request) {
+		id := strings.TrimSpace(request.PathValue("id"))
+		found, canceled := config.Store.CancelRun(id)
+		if !found {
+			writeJSON(writer, http.StatusNotFound, errorResponse{Error: "run not found"})
+			return
+		}
+		if !canceled {
+			writeJSON(writer, http.StatusConflict, errorResponse{Error: "run is no longer cancelable"})
+			return
+		}
+		writeJSON(writer, http.StatusAccepted, startResponse{ID: id})
+	})
+	mux.HandleFunc("GET /api/runs/{id}", func(writer http.ResponseWriter, request *http.Request) {
+		id := strings.TrimSpace(request.PathValue("id"))
+		snapshot, found := config.Store.GetRun(id)
+		if !found {
+			writeJSON(writer, http.StatusNotFound, errorResponse{Error: "run not found"})
+			return
+		}
+		writeJSON(writer, http.StatusOK, snapshot)
+	})
+	mux.HandleFunc("GET /templates", servePage("templates.html"))
+	mux.HandleFunc("GET /templates/new", servePage("template.html"))
+	mux.HandleFunc("GET /templates/{id}", servePage("template.html"))
+	mux.HandleFunc("GET /runs", servePage("runs.html"))
+	mux.HandleFunc("GET /runs/{id}", servePage("run.html"))
+	mux.HandleFunc("GET /assets/{name}", serveAsset)
+	mux.HandleFunc("GET /", func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/" {
+			http.NotFound(writer, request)
+			return
+		}
+		http.Redirect(writer, request, "/templates", http.StatusSeeOther)
+	})
+	registerLegacyAPI(mux, config, starts)
+
+	return mux, nil
+}
+
+// registerLegacyAPI preserves the original programmatic browser API while the visible product
+// moves to saved templates and plural page routes. It remains generated-oracle only and keeps the
+// old strict request boundary intact; new browser pages use /api and server-loaded templates.
+func registerLegacyAPI(mux *http.ServeMux, config Config, starts *startRegistry) {
+	legacySetup := setupResponse{Models: config.Models.Options(), Defaults: config.Defaults, Presets: append([]Preset(nil), config.Presets...)}
+	mux.HandleFunc("GET /setup", func(writer http.ResponseWriter, _ *http.Request) {
+		writeJSON(writer, http.StatusOK, legacySetup)
 	})
 	mux.HandleFunc("POST /signature-draft", func(writer http.ResponseWriter, request *http.Request) {
 		input, err := decodeSignatureDraftRequest(writer, request)
@@ -109,15 +258,11 @@ func New(config Config) (http.Handler, error) {
 			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
 			return
 		}
-
-		task := taskForRunRequest(input)
-
 		coder, err := config.Models.Resolve(input.CoderModel)
 		if err != nil {
 			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "unknown code-writer model"})
 			return
 		}
-
 		tester, err := config.Models.Resolve(input.TesterModel)
 		if err != nil {
 			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "unknown test-writer model"})
@@ -128,19 +273,8 @@ func New(config Config) (http.Handler, error) {
 			writeJSON(writer, http.StatusInternalServerError, errorResponse{Error: "configured oracle reviewer model is unavailable"})
 			return
 		}
-
-		id, err := starts.start(input.RequestID, func() (string, error) {
-			return config.Store.StartRun(
-				task,
-				run.Roles{
-					Coder:         coder,
-					Tester:        tester,
-					Reviewer:      reviewer,
-					CoderModel:    input.CoderModel,
-					TesterModel:   input.TesterModel,
-					ReviewerModel: config.ReviewerModel,
-				},
-			)
+		runID, err := starts.start(input.RequestID, func() (string, error) {
+			return config.Store.StartRun(taskForRunRequest(input), run.Roles{Coder: coder, Tester: tester, Reviewer: reviewer, CoderModel: input.CoderModel, TesterModel: input.TesterModel, ReviewerModel: config.ReviewerModel})
 		})
 		if err != nil {
 			if errors.Is(err, run.ErrRunActive) {
@@ -150,33 +284,38 @@ func New(config Config) (http.Handler, error) {
 			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
 			return
 		}
-		writeJSON(writer, http.StatusAccepted, startResponse{ID: id})
+		writeJSON(writer, http.StatusAccepted, startResponse{ID: runID})
 	})
 	mux.HandleFunc("POST /run/{id}/cancel", func(writer http.ResponseWriter, request *http.Request) {
-		id := strings.TrimSpace(request.PathValue("id"))
-		found, canceled := config.Store.CancelRun(id)
-		if !found {
-			writeJSON(writer, http.StatusNotFound, errorResponse{Error: "run not found"})
-			return
-		}
-		if !canceled {
-			writeJSON(writer, http.StatusConflict, errorResponse{Error: "run is no longer cancelable"})
-			return
-		}
-		writeJSON(writer, http.StatusAccepted, startResponse{ID: id})
+		cancelRun(writer, request, config.Store)
 	})
 	mux.HandleFunc("GET /run/{id}", func(writer http.ResponseWriter, request *http.Request) {
-		id := strings.TrimSpace(request.PathValue("id"))
-		snapshot, found := config.Store.GetRun(id)
-		if !found {
-			writeJSON(writer, http.StatusNotFound, errorResponse{Error: "run not found"})
-			return
-		}
-		writeJSON(writer, http.StatusOK, snapshot)
+		getRun(writer, request, config.Store)
 	})
-	mux.HandleFunc("GET /", serveIndex)
+}
 
-	return mux, nil
+func cancelRun(writer http.ResponseWriter, request *http.Request, store *run.Store) {
+	id := strings.TrimSpace(request.PathValue("id"))
+	found, canceled := store.CancelRun(id)
+	if !found {
+		writeJSON(writer, http.StatusNotFound, errorResponse{Error: "run not found"})
+		return
+	}
+	if !canceled {
+		writeJSON(writer, http.StatusConflict, errorResponse{Error: "run is no longer cancelable"})
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, startResponse{ID: id})
+}
+
+func getRun(writer http.ResponseWriter, request *http.Request, store *run.Store) {
+	id := strings.TrimSpace(request.PathValue("id"))
+	snapshot, found := store.GetRun(id)
+	if !found {
+		writeJSON(writer, http.StatusNotFound, errorResponse{Error: "run not found"})
+		return
+	}
+	writeJSON(writer, http.StatusOK, snapshot)
 }
 
 type setupResponse struct {
@@ -210,6 +349,118 @@ type runRequest struct {
 	Signature   string `json:"signature"`
 	CoderModel  string `json:"coderModel"`
 	TesterModel string `json:"testerModel"`
+}
+
+type templateCreateRequest struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Spec      string `json:"spec"`
+	Signature string `json:"signature"`
+}
+
+type templateUpdateRequest struct {
+	Name      string `json:"name"`
+	Spec      string `json:"spec"`
+	Signature string `json:"signature"`
+}
+
+type templateRunRequest struct {
+	RequestID   string `json:"requestId"`
+	CoderModel  string `json:"coderModel"`
+	TesterModel string `json:"testerModel"`
+}
+
+func taskForTemplate(selected template.Template) domain.Task {
+	return domain.Task{
+		Name:      selected.Name,
+		Spec:      selected.Spec,
+		Signature: selected.Signature,
+		Oracle:    domain.OracleGenerated,
+	}
+}
+
+func rolesForTemplateRun(config Config, input templateRunRequest) (run.Roles, error) {
+	coder, err := config.Models.Resolve(input.CoderModel)
+	if err != nil {
+		return run.Roles{}, errors.New("unknown code-writer model")
+	}
+	tester, err := config.Models.Resolve(input.TesterModel)
+	if err != nil {
+		return run.Roles{}, errors.New("unknown test-writer model")
+	}
+	reviewer, err := config.Models.Resolve(config.ReviewerModel)
+	if err != nil {
+		return run.Roles{}, errors.New("configured oracle reviewer model is unavailable")
+	}
+	return run.Roles{
+		Coder:         coder,
+		Tester:        tester,
+		Reviewer:      reviewer,
+		CoderModel:    input.CoderModel,
+		TesterModel:   input.TesterModel,
+		ReviewerModel: config.ReviewerModel,
+	}, nil
+}
+
+func decodeTemplateCreateRequest(writer http.ResponseWriter, request *http.Request) (templateCreateRequest, error) {
+	var input templateCreateRequest
+	if err := decodeJSON(writer, request, &input); err != nil {
+		return templateCreateRequest{}, err
+	}
+	return input, nil
+}
+
+func decodeTemplateUpdateRequest(writer http.ResponseWriter, request *http.Request) (templateUpdateRequest, error) {
+	var input templateUpdateRequest
+	if err := decodeJSON(writer, request, &input); err != nil {
+		return templateUpdateRequest{}, err
+	}
+	return input, nil
+}
+
+func decodeTemplateRunRequest(writer http.ResponseWriter, request *http.Request) (templateRunRequest, error) {
+	var input templateRunRequest
+	if err := decodeJSON(writer, request, &input); err != nil {
+		return templateRunRequest{}, err
+	}
+	input.RequestID = strings.TrimSpace(input.RequestID)
+	input.CoderModel = strings.TrimSpace(input.CoderModel)
+	input.TesterModel = strings.TrimSpace(input.TesterModel)
+	if err := validateRequestID(input.RequestID); err != nil {
+		return templateRunRequest{}, err
+	}
+	if input.CoderModel == "" {
+		return templateRunRequest{}, errors.New("code-writer model is required")
+	}
+	if input.TesterModel == "" {
+		return templateRunRequest{}, errors.New("test-writer model is required")
+	}
+	return input, nil
+}
+
+func decodeJSON(writer http.ResponseWriter, request *http.Request, value any) error {
+	request.Body = http.MaxBytesReader(writer, request.Body, maxRunRequestBytes)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return fmt.Errorf("invalid request: %w", err)
+	}
+	if err := ensureSingleJSONValue(decoder); err != nil {
+		return err
+	}
+	return nil
+}
+
+func writeTemplateError(writer http.ResponseWriter, err error) {
+	if errors.Is(err, template.ErrNotFound) {
+		writeJSON(writer, http.StatusNotFound, errorResponse{Error: "template not found"})
+		return
+	}
+	if errors.Is(err, template.ErrUnsafeStorage) {
+		writeJSON(writer, http.StatusInternalServerError, errorResponse{Error: "template library is unavailable"})
+		return
+	}
+	writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
 }
 
 func taskForRunRequest(input runRequest) domain.Task {
@@ -347,21 +598,6 @@ func validateFunctionSignature(signature string) error {
 		return fmt.Errorf("Go function signature is invalid: %w", err)
 	}
 	return nil
-}
-
-func serveIndex(writer http.ResponseWriter, request *http.Request) {
-	if request.URL.Path != "/" {
-		http.NotFound(writer, request)
-		return
-	}
-
-	contents, err := embeddedFiles.ReadFile("index.html")
-	if err != nil {
-		http.Error(writer, "embedded UI is unavailable", http.StatusInternalServerError)
-		return
-	}
-	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = writer.Write(contents)
 }
 
 func writeJSON(writer http.ResponseWriter, status int, value any) {

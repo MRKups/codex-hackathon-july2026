@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Task Templates · Test Verifier</title><link rel="stylesheet" href="/assets/styles.css"></head>
+  <body>
+    <main>
+      <header class="header"><div><h1>Task templates</h1><p class="muted">Author source-free task inputs here. Starting a run creates a new blind oracle.</p></div><nav class="nav"><a href="/templates">Templates</a><a href="/runs">Runs</a><a class="button primary" href="/templates/new">New template</a></nav></header>
+      <section class="panel"><h2>Library</h2><p id="notice" class="notice">Loading templates…</p><div id="templates" class="list"></div></section>
+    </main>
+    <script>
+      const notice = document.querySelector('#notice');
+      const list = document.querySelector('#templates');
+      function element(tag, text, className) { const value = document.createElement(tag); value.textContent = text; if (className) value.className = className; return value; }
+      async function load() {
+        try {
+          const response = await fetch('/api/templates', {headers: {'Accept': 'application/json'}});
+          const templates = await response.json();
+          if (!response.ok) throw new Error(templates.error || 'Could not load templates.');
+          list.replaceChildren();
+          if (!templates.length) { notice.textContent = 'No templates yet. Create one to begin.'; return; }
+          notice.textContent = `${templates.length} saved template${templates.length === 1 ? '' : 's'}.`;
+          for (const template of templates) {
+            const link = document.createElement('a'); link.className = 'item'; link.href = '/templates/' + encodeURIComponent(template.id);
+            link.append(element('h3', template.name), element('p', template.id, 'id'), element('p', template.signature, 'muted'));
+            list.append(link);
+          }
+        } catch (error) { notice.textContent = error.message; notice.classList.add('error'); }
+      }
+      load();
+    </script>
+  </body>
+</html>

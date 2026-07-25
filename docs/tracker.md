@@ -21,17 +21,18 @@ Branch strategy: `main` (active development and production during the hackathon)
 > until a later explicit persistence feature. F6 supplies the source-free repository; F27 supplies
 > the multi-route authoring, launch, and analysis browser workflow.
 
-> **Continuation handoff, 2026-07-25.** F25 and F26 are implemented in the current uncommitted
-> worktree and their full verification suite passed without a provider call: `go build ./...`,
+> **Continuation handoff, 2026-07-25.** F25 and F26 are implemented and committed as
+> `78f3985`; their full verification suite passed without a provider call: `go build ./...`,
 > `go test -count=1 ./...`, `go test -race ./...`, `go vet ./...`, `go mod verify`, embedded
 > JavaScript syntax, and `git diff --check`. F25 adds the bounded reviewer/revision path,
 > `LLM_MODEL_REVIEWER`, `reviewingoracle`, and review provenance; F26 adds `internal/draft`,
-> `POST /signature-draft`, and explicit browser application of a syntax-valid draft. The next
-> implementation item is **F6**, then F27. F6 must be a concrete, source-free
-> `internal/template` repository manually wired from `cmd/repair`; add no browser-authored test
-> source, Oracle mode selector, task-family dispatch, persistence of runs, or dependency upward
-> from `template` into `server`/`run`/`oracle`/`repair`. Re-read the F6/F27 contracts below before
-> coding; retain the F25/F26 changes in the current worktree.
+> `POST /signature-draft`, and explicit browser application of a syntax-valid draft. F6 and F27
+> are now implemented in the current worktree: `internal/template` stores source-free template
+> inputs, while the explicit browser routes author templates, launch template-backed generated
+> runs, and analyze immutable evidence. Keep the no-test-source/no-oracle-mode/no-run-persistence
+> boundary intact. The next product-validation work is **F5** (real saved-task prompt/oracle
+> evaluation); **F18** remains an optional failure diagnostic. Re-read those contracts before
+> coding and retain the F25–F27 changes.
 
 > **Corrective design decision, 2026-07-21.** The first MinCoins profile was an invalid product
 > shortcut: an exact browser-text match silently chose task-specific semantic code. The active
@@ -382,7 +383,7 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   Caution: tune for a clear, honest demo first. For later comparisons, keep prompts fixed so
   prompt changes are not confused with the diagnostic signal (see C5).
 
-- [ ] **F6 — Source-free task-template repository.** Replace the superseded optional-test-file
+- [x] **F6 — Source-free task-template repository.** Replace the superseded optional-test-file
   task-loader sketch with `internal/template`: a small data-only repository rooted at the
   composition-root-configured project `templates/` directory. Each template directory contains one
   versioned `template.json` with a stable validated ID, display name, specification, and confirmed
@@ -395,6 +396,16 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   and canonical template-content digest as provenance outside the bundle manifest. Do not write a
   generated oracle back into `templates/`.
   Depends on: F26.
+  Verification (2026-07-25): added `internal/template`, a concrete repository configured from
+  `cmd/repair -templates-dir` and injected into `server`. It creates, lists, loads, and atomically
+  updates versioned `template.json` files containing only ID, display name, specification, and
+  signature; canonical source-free content digests are calculated on load/save, never persisted
+  as authoritative input. Strict decoding, bounded fields/files, stable lowercase IDs,
+  `domain.ValidateSignature`, traversal rejection, and directory/file symlink rejection keep the
+  repository data-only. Repository tests cover create/load/list/update, digest changes, malformed
+  or oversized documents, unknown fields, mismatched IDs, traversal, symlinks, and atomic
+  replacement. `gofmt`, `go build ./...`, `go test -count=1 ./...`, `go test -race ./...`,
+  `go vet ./...`, `go mod verify`, and `git diff --check` passed without a provider call.
 
 ### Phase 2 — State (the bridge)
 
@@ -450,7 +461,7 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   network failures. Verification (2026-07-18): the inline script parsed, static checks
   found no external assets/framework or HTML injection API, and the server test serves it.
 
-- [ ] **F27 — Multi-route template authoring and run analysis UI.** Replace the one-screen
+- [x] **F27 — Multi-route template authoring and run analysis UI.** Replace the one-screen
   browser workflow with small embedded vanilla HTML/CSS/JS documents and explicit routes:
   `/templates` for the library, `/templates/new` and `/templates/{id}` for focused authoring,
   `/runs` for template selection and launch, and `/runs/{id}` for one evidence record. Add strict
@@ -476,6 +487,22 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   untrusted text rendering, and a final run-detail evidence view. `go build ./...`,
   `go test ./...`, `go test -race ./...`, `go vet ./...`, `go mod verify`, formatting, and
   `git diff --check` must pass without a provider call.
+  Verification (2026-07-25): added explicit embedded `/templates`, `/templates/new`,
+  `/templates/{id}`, `/runs`, and `/runs/{id}` pages with one shared stylesheet and no frontend
+  framework/CDN/build chain. `/api/templates` provides strict list/create/load/update operations;
+  `/api/templates/{id}/runs` server-loads the source-free template, constructs the generated task,
+  records its ID/canonical digest as run provenance outside the bundle, and preserves the store's
+  idempotency and single-live-run guard. `/api/runs` supplies current-process history plus detail
+  and cancellation endpoints. Authoring keeps signature drafting explicit, launch keeps templates
+  read-only and exposes only configured coder/tester selections, and run detail renders untrusted
+  values with `textContent`, including frozen oracle evidence, attempts, capped output, and final
+  JSON download. Legacy generated-only API aliases remain for programmatic compatibility; the
+  browser uses only the template-backed routes. Handler tests cover template persistence/errors,
+  template-to-generated-task conversion, provenance snapshotting, unknown templates, idempotent
+  launch, existing one-live-run protection, explicit routes, and unsafe DOM API absence. `gofmt`,
+  all embedded-JavaScript syntax checks, `go build ./...`, `go test -count=1 ./...`,
+  `go test -race ./...`, `go vet ./...`, `go mod verify`, and `git diff --check` passed without a
+  provider call.
 
 ### Phase 5 — Stretch (only if the above is solid)
 
