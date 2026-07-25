@@ -3,6 +3,8 @@ package run
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -128,7 +130,7 @@ func TestStoreUsesTheInjectedResolverBeforeCandidateRepair(t *testing.T) {
 	}
 	resolver := &recordingResolver{resolution: oracle.Resolution{Bundle: bundle}}
 	executor := &recordingExecutor{result: domain.Attempt{N: 1, Passed: true}}
-	store, err := NewStore(Config{MaxAttempts: 1, TestTimeout: 10 * time.Second, RunTimeout: time.Minute}, resolver, executor)
+	store, err := NewStore(testConfig(Config{MaxAttempts: 1, TestTimeout: 10 * time.Second, RunTimeout: time.Minute}), resolver, executor)
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
@@ -190,7 +192,7 @@ func TestStoreKeepsCandidateAttemptZeroUntilResolution(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			resolver := newGatedResolver(tt.resolution)
 			executor := &recordingExecutor{result: domain.Attempt{N: 1, Passed: true}}
-			store, err := NewStore(Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute}, resolver, executor)
+			store, err := NewStore(testConfig(Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute}), resolver, executor)
 			if err != nil {
 				t.Fatalf("NewStore() error = %v", err)
 			}
@@ -248,7 +250,7 @@ func TestIncrement(t *testing.T) {
 func Increment(value int) int { return value + 1 }
 `
 	coder := &scriptedLLM{responses: []scriptedResponse{{text: correctCode}}}
-	store, err := NewStore(Config{MaxAttempts: 1, TestTimeout: 10 * time.Second, RunTimeout: time.Minute}, resolver, repair.NewExecutor())
+	store, err := NewStore(testConfig(Config{MaxAttempts: 1, TestTimeout: 10 * time.Second, RunTimeout: time.Minute}), resolver, repair.NewExecutor())
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
@@ -310,7 +312,7 @@ func TestStoreRejectsInvalidInjectedResolutionBeforeSnapshotOrCandidate(t *testi
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			executor := &recordingExecutor{result: domain.Attempt{N: 1, Passed: true}}
-			store, err := NewStore(Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute}, &recordingResolver{resolution: tt.resolution}, executor)
+			store, err := NewStore(testConfig(Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: time.Minute}), &recordingResolver{resolution: tt.resolution}, executor)
 			if err != nil {
 				t.Fatalf("NewStore() error = %v", err)
 			}
@@ -341,7 +343,7 @@ func TestStoreDoesNotPublishLateResolutionAfterTimeout(t *testing.T) {
 	}
 	resolver := newLateResolver(oracle.Resolution{Bundle: bundle})
 	executor := &recordingExecutor{result: domain.Attempt{N: 1, Passed: true}}
-	store, err := NewStore(Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: 75 * time.Millisecond}, resolver, executor)
+	store, err := NewStore(testConfig(Config{MaxAttempts: 1, TestTimeout: time.Second, RunTimeout: 75 * time.Millisecond}), resolver, executor)
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
@@ -468,6 +470,65 @@ func TestStoreRejectsSecondLiveRun(t *testing.T) {
 	_ = waitForTerminalRun(t, store, id)
 }
 
+func TestStoreLogsSafeProviderFailure(t *testing.T) {
+	var output lockedLogBuffer
+	logger := slog.New(slog.NewTextHandler(&output, nil))
+	store := newStore(t, Config{MaxAttempts: 1, TestTimeout: 10 * time.Second, RunTimeout: time.Minute, Logger: logger})
+	task := incrementTask()
+	task.Spec = "RUN_SPEC_LOG_SENTINEL must never be logged"
+	task.TestCode = strings.ReplaceAll(task.TestCode, "RUN_TEST_FAILURE_MARKER", "RUN_ORACLE_LOG_SENTINEL")
+
+	id, err := store.StartRun(task, Roles{Coder: &scriptedLLM{responses: []scriptedResponse{{err: &llm.HTTPStatusError{StatusCode: 500}}}}, CoderModel: "code-model"})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	if got := waitForTerminalRun(t, store, id); got.Status != StatusInfrastructureFailed {
+		t.Fatalf("run status = %q, want infrastructurefailed; error = %q", got.Status, got.Error)
+	}
+	waitForLog(t, &output, "run finished")
+
+	logs := output.String()
+	for _, want := range []string{"run finished", "run_id=" + id, "failure_kind=provider_http", "provider_status=500"} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs = %q, want %q", logs, want)
+		}
+	}
+	for _, forbidden := range []string{"RUN_SPEC_LOG_SENTINEL", "RUN_ORACLE_LOG_SENTINEL"} {
+		if strings.Contains(logs, forbidden) {
+			t.Fatalf("logs exposed forbidden source material %q: %s", forbidden, logs)
+		}
+	}
+}
+
+type lockedLogBuffer struct {
+	mu     sync.Mutex
+	buffer strings.Builder
+}
+
+func (buffer *lockedLogBuffer) Write(contents []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.Write(contents)
+}
+
+func (buffer *lockedLogBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.String()
+}
+
+func waitForLog(t *testing.T, buffer *lockedLogBuffer, want string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(buffer.String(), want) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("log output %q did not contain %q", buffer.String(), want)
+}
+
 func TestStoreRejectsInvalidInputs(t *testing.T) {
 	if _, err := NewStore(Config{}, nil, nil); err == nil {
 		t.Fatal("NewStore(Config{}) error = nil, want validation error")
@@ -498,6 +559,7 @@ func TestStoreRejectsInvalidInputs(t *testing.T) {
 
 func newStore(t *testing.T, config Config) *Store {
 	t.Helper()
+	config = testConfig(config)
 	resolver, err := oracle.NewResolver(oracle.Config{
 		MaxAttempts:      1,
 		PreflightTimeout: config.TestTimeout,
@@ -512,6 +574,13 @@ func newStore(t *testing.T, config Config) *Store {
 		t.Fatalf("NewStore() error = %v", err)
 	}
 	return store
+}
+
+func testConfig(config Config) Config {
+	if config.Logger == nil {
+		config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	return config
 }
 
 func waitForTerminalRun(t *testing.T, store *Store, id string) Run {

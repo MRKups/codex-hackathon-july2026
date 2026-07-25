@@ -1,6 +1,6 @@
 # Test Verifier — Implementation Tracker
 
-*Identifier counter: the next new items are **F28, C7, B4**.
+*Identifier counter: the next new items are **F31, C7, B4**.
 Branch strategy: `main` (active development and production during the hackathon).*
 
 > **Product-language decision, 2026-07-24.** The product is named **Test Verifier**. “Verifier
@@ -33,6 +33,11 @@ Branch strategy: `main` (active development and production during the hackathon)
 > boundary intact. The next product-validation work is **F5** (real saved-task prompt/oracle
 > evaluation); **F18** remains an optional failure diagnostic. Re-read those contracts before
 > coding and retain the F25–F27 changes.
+
+> **Run-URL behavior, 2026-07-25.** Runs intentionally remain in memory. After a server restart,
+> an old `/runs/{id}` URL is not corrupt evidence; it is unavailable because that process no
+> longer owns the snapshot. F27's detail page must replace its loading state with an explicit
+> explanation and direct the user back to `/runs`, never imply that the verifier is still loading.
 
 > **Corrective design decision, 2026-07-21.** The first MinCoins profile was an invalid product
 > shortcut: an exact browser-text match silently chose task-specific semantic code. The active
@@ -406,6 +411,9 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   or oversized documents, unknown fields, mismatched IDs, traversal, symlinks, and atomic
   replacement. `gofmt`, `go build ./...`, `go test -count=1 ./...`, `go test -race ./...`,
   `go vet ./...`, `go mod verify`, and `git diff --check` passed without a provider call.
+  Initial repository content (2026-07-25): committed five source-free editable starter templates:
+  Split cents, Word wrap, Compare semantic versions, Reverse ASCII text, and Deduplicate strings.
+  They contain only the v1 template fields and never pre-supply test source or oracle settings.
 
 ### Phase 2 — State (the bridge)
 
@@ -427,6 +435,61 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
   immutable snapshots, and one-live-run protection.
 
 ### Phase 3 — Web server
+
+- [x] **F30 — Truthful live run-progress display.** The immutable run detail page must make a
+  long provider/oracle/verifier operation visibly active without inventing a completion percent.
+  Render the server-owned current phase as a human-readable operation, show the current candidate
+  attempt/budget where one exists, and run an animated **indeterminate** bar plus an elapsed timer
+  while status is `running`. Terminal states stop the animation and display the actual outcome.
+  The bar is activity feedback, not evidence of progress through a fixed amount of work: generated
+  oracle review may request its one allowed revision and candidate attempts can vary. Keep polling
+  the existing snapshot endpoint; do not add SSE or browser-side lifecycle state. Depends on: F27,
+  F28.
+  Verification (2026-07-25): `/runs/{id}` now renders the exact server phase as a readable
+  operation, an animated indeterminate activity bar, and a client-side elapsed timer while polling
+  the existing run snapshot. The bar remains visibly active during long oracle/provider/verifier
+  work but makes no percentage claim; passed and non-passing terminal states stop it with the
+  actual outcome. Expired run URLs also render a non-animated unavailable state. Server route tests
+  assert the progress/expired-run copy and no unsafe HTML API; embedded JavaScript syntax checks,
+  `gofmt`, `go build ./...`, `go test -count=1 ./...`, `go test -race ./...`, `go vet ./...`,
+  `go mod verify`, and `git diff --check` passed without a provider call.
+
+- [x] **F29 — Human-readable colored structured logs.** Replace the composition root's plain
+  stdlib text handler with `github.com/lmittmann/tint`, a deliberately narrow third-party
+  exception to the stdlib-first rule. The standard `slog` package produces structured records but
+  has no colored human handler; `tint` preserves those records and improves local terminal
+  diagnosis without entering `server`, `run`, the verification boundary, or the browser bundle.
+  Add a validated `-log-color auto|always|never` flag: `auto` colors only interactive stderr and
+  honors the standard `NO_COLOR` environment convention, while redirected logs remain plain.
+  Keep every F28 no-source/no-secret logging rule unchanged. Depends on: F28.
+  Verification (2026-07-25): added direct `github.com/lmittmann/tint v1.2.0` and used it only in
+  `cmd/repair` to construct the injected logger. `auto` uses stderr's character-device mode and
+  respects `NO_COLOR`; `always` and `never` are validated overrides. Unit tests prove debug-level
+  handling, invalid configuration rejection, and actual ANSI escape presence/absence for the
+  forced color/plain modes. `gofmt`, `go build ./...`, `go test -count=1 ./...`, `go test -race
+  ./...`, `go vet ./...`, `go mod verify`, and `git diff --check` passed without a provider call.
+
+- [x] **F28 — Safe structured operational observability.** Inject one explicitly constructed
+  stdlib `slog.Logger` from `cmd/repair` into `server` and `run`, with a validated `-log-level`
+  configuration flag. Emit metadata-only stderr events for HTTP responses, signature-draft
+  start/success/failure, and run start/phase/frozen-bundle/attempt/cancel/terminal events. A
+  signature-draft failure must retain a safe browser boundary while distinguishing a
+  provider HTTP status, deadline/cancellation, response-size limit, invalid model output, or
+  transport failure in both browser-safe wording and the log. Never log task/spec/signature text,
+  prompt, candidate/test source, verifier/provider body, request body, endpoint, header, or
+  credential. Tests must capture logs and prove useful failure classification plus the absence of
+  submitted source text. Depends on: F7, F26, F27.
+  Verification (2026-07-25): `cmd/repair -log-level` now constructs and injects a stdlib text
+  logger to stderr, rejecting invalid levels. Request completion is logged without query/body
+  data; successful mutations and all 4xx/5xx responses are visible at the default `info` level,
+  while successful GET/poll responses remain `debug` to avoid log noise. Signature-draft events
+  identify model ID, sizes, duration, and a safe failure class; an HTTP 500 also records
+  `provider_status=500` and gives the browser a safe actionable explanation. `run.Store` logs
+  start, every phase, frozen manifest digests/sizes, attempt sizes/result, cancellation, and
+  terminal status/failure class without source or verifier output. Captured-log tests prove an
+  HTTP-500 draft and run are classified while submitted-spec and oracle-source sentinels never
+  appear. `gofmt`, `go build ./...`, `go test -count=1 ./...`, `go test -race ./...`, `go vet
+  ./...`, `go mod verify`, and `git diff --check` passed without a provider call.
 
 - [x] **F8 — HTTP layer.** `internal/server` + `cmd/repair -serve` use Go 1.22+ `net/http`
   routing. `GET /setup` returns safe model IDs, role defaults, and editable presets. `POST /run`

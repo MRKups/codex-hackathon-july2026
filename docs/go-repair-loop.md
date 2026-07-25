@@ -308,6 +308,8 @@ candidates and provider wrapper replies.
 | `-attempts` | Candidate-code attempts after an oracle is frozen. |
 | `-run-timeout` | Entire browser run, across tester, coder, and Go work. |
 | `-templates-dir` | Project-root directory for source-free saved task templates. |
+| `-log-level` | Minimum stderr structured-log level: `debug`, `info`, `warn`, or `error`. |
+| `-log-color` | Stderr log color: `auto` (default), `always`, or `never`. |
 
 `LLM_MODEL` remains required. `LLM_MODELS` is a local comma-separated browser allowlist.
 `LLM_MODEL_CODER` and `LLM_MODEL_TESTER` select defaults and fall back to `LLM_MODEL`.
@@ -316,6 +318,32 @@ The browser sees only safe coder/test-writer IDs, never provider credentials, a 
 or an arbitrary model field. The current OpenAI adapter uses the official SDK's stateless Chat Completions
 surface with the explicitly configured base URL; a future Responses migration is a separate
 behavior change, not an implicit transport detail.
+
+## Operational observability (F28)
+
+The browser does not receive provider diagnostics, prompts, or raw model output. Instead, the
+composition root writes structured `slog` events to stderr through the narrow `tint` handler.
+`-log-level` controls the minimum level and defaults to `info`; `debug` is useful while diagnosing
+a local request. `-log-color auto` colors an interactive terminal and honors `NO_COLOR`; `always`
+and `never` are explicit overrides. Logs cover every
+HTTP response (method, path, status, duration), the signature-draft request/result lifecycle, and
+the asynchronous run lifecycle (start, phase changes, frozen-bundle digest, capped attempt result,
+cancel, and terminal status). Signature-draft failures distinguish safe categories such as provider
+HTTP status, timeout, transport failure, overlarge reply, and invalid model output; the browser can
+surface that same safe category without showing provider bodies.
+
+The log contract is deliberately metadata-only. Never emit a task specification, Go signature,
+prompt, candidate source, generated test source, verifier output, raw provider response, request
+body, authorization header, API key, or provider endpoint. IDs, configured model IDs, byte counts,
+status codes, elapsed durations, and already-public bundle/template digests are sufficient to
+diagnose the ordinary operational path without weakening the source boundary.
+
+The run-detail page renders this same server-owned lifecycle as a live, animated indeterminate
+activity bar and elapsed timer. It names the actual stage—writing/preflighting/reviewing the blind
+oracle, generating a candidate, or verifying Go—and shows candidate attempt/budget when relevant.
+It deliberately does not estimate a percentage: oracle revision and bounded candidate repair mean
+the remaining work is not known truthfully. A terminal snapshot stops the animation and shows its
+actual result.
 
 ## Deferred work
 

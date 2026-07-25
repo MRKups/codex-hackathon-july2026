@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -197,6 +199,38 @@ func TestSignatureDraftAPIValidatesAndHasNoRunSideEffect(t *testing.T) {
 		if bad.Code != http.StatusBadRequest {
 			t.Fatalf("POST /signature-draft body %s status = %d, want 400", body, bad.Code)
 		}
+	}
+}
+
+func TestSignatureDraftFailureLogsSafeProviderStatus(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&output, nil))
+	provider := llm.ClientFactoryFunc(func(string) (llm.LLM, error) {
+		return providerTestLLM{complete: func(context.Context, string) (string, error) {
+			return "", &llm.HTTPStatusError{StatusCode: 500}
+		}}, nil
+	})
+	handler := newHandlerWithLogger(t, provider, logger)
+
+	const spec = "SERVER_SPEC_LOG_SENTINEL must never appear in a log"
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/signature-draft", strings.NewReader(`{"spec":"`+spec+`","testerModel":"test-model"}`))
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("POST /api/signature-draft status = %d, want %d: %s", response.Code, http.StatusBadGateway, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "provider returned HTTP 500") {
+		t.Fatalf("signature draft response = %s, want safe provider status", response.Body.String())
+	}
+
+	logs := output.String()
+	for _, want := range []string{"signature draft failed", "model=test-model", "failure_kind=provider_http", "provider_status=500", "http request completed", "status=502"} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs = %q, want %q", logs, want)
+		}
+	}
+	if strings.Contains(logs, spec) {
+		t.Fatalf("logs exposed submitted specification: %s", logs)
 	}
 }
 
@@ -406,6 +440,9 @@ func TestTemplateAPIsRejectUnsafeInputAndPagesAreExplicit(t *testing.T) {
 		if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "innerHTML") {
 			t.Fatalf("GET %s = status %d with unsafe page content", route, response.Code)
 		}
+		if route == "/runs/run_000001" && (!strings.Contains(response.Body.String(), "Run no longer available") || !strings.Contains(response.Body.String(), "Writing blind test oracle") || !strings.Contains(response.Body.String(), "without a completion percentage")) {
+			t.Fatalf("GET %s does not provide truthful live run progress", route)
+		}
 	}
 	missing := httptest.NewRecorder()
 	handler.ServeHTTP(missing, httptest.NewRequest(http.MethodGet, "/unknown", nil))
@@ -435,6 +472,10 @@ func TestNewRejectsIncompleteConfig(t *testing.T) {
 }
 
 func newHandler(t *testing.T, provider llm.ClientFactory) http.Handler {
+	return newHandlerWithLogger(t, provider, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func newHandlerWithLogger(t *testing.T, provider llm.ClientFactory, logger *slog.Logger) http.Handler {
 	t.Helper()
 	catalog, err := llm.NewModelCatalog(provider, "code-model", []string{"code-model", "test-model"})
 	if err != nil {
@@ -453,6 +494,7 @@ func newHandler(t *testing.T, provider llm.ClientFactory) http.Handler {
 		MaxAttempts: 1,
 		TestTimeout: 10 * time.Second,
 		RunTimeout:  time.Minute,
+		Logger:      logger,
 	}, resolver, repair.NewExecutor())
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
@@ -476,6 +518,7 @@ func newHandler(t *testing.T, provider llm.ClientFactory) http.Handler {
 			Spec:      "Return the input integer increased by one.",
 			Signature: "func Increment(value int) int",
 		}},
+		Logger: logger,
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

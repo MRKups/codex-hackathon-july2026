@@ -2,13 +2,16 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"codex-hackathon-july2026/internal/domain"
 	"codex-hackathon-july2026/internal/draft"
@@ -49,6 +52,7 @@ type Config struct {
 	Defaults      ModelDefaults
 	ReviewerModel string
 	Presets       []Preset
+	Logger        *slog.Logger
 }
 
 // New returns the browser handler for interactive generated-oracle runs.
@@ -64,6 +68,9 @@ func New(config Config) (http.Handler, error) {
 	}
 	if config.Templates == nil {
 		return nil, errors.New("template repository is required")
+	}
+	if config.Logger == nil {
+		return nil, errors.New("server logger is required")
 	}
 	if _, err := config.Models.Resolve(config.Defaults.CoderModel); err != nil {
 		return nil, fmt.Errorf("resolve default coder model: %w", err)
@@ -86,24 +93,7 @@ func New(config Config) (http.Handler, error) {
 	mux.HandleFunc("GET /api/setup", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, setup)
 	})
-	mux.HandleFunc("POST /api/signature-draft", func(writer http.ResponseWriter, request *http.Request) {
-		input, err := decodeSignatureDraftRequest(writer, request)
-		if err != nil {
-			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
-			return
-		}
-		author, err := config.Models.Resolve(input.TesterModel)
-		if err != nil {
-			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "unknown test-writer model"})
-			return
-		}
-		signature, err := config.Draft.Suggest(request.Context(), author, input.Spec)
-		if err != nil {
-			writeJSON(writer, http.StatusBadGateway, errorResponse{Error: "signature drafting failed"})
-			return
-		}
-		writeJSON(writer, http.StatusOK, signatureDraftResponse{Signature: signature, Model: input.TesterModel})
-	})
+	mux.HandleFunc("POST /api/signature-draft", signatureDraftHandler(config))
 	mux.HandleFunc("GET /api/templates", func(writer http.ResponseWriter, _ *http.Request) {
 		templates, err := config.Templates.List()
 		if err != nil {
@@ -223,7 +213,7 @@ func New(config Config) (http.Handler, error) {
 	})
 	registerLegacyAPI(mux, config, starts)
 
-	return mux, nil
+	return withRequestLogging(mux, config.Logger), nil
 }
 
 // registerLegacyAPI preserves the original programmatic browser API while the visible product
@@ -234,24 +224,7 @@ func registerLegacyAPI(mux *http.ServeMux, config Config, starts *startRegistry)
 	mux.HandleFunc("GET /setup", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, legacySetup)
 	})
-	mux.HandleFunc("POST /signature-draft", func(writer http.ResponseWriter, request *http.Request) {
-		input, err := decodeSignatureDraftRequest(writer, request)
-		if err != nil {
-			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
-			return
-		}
-		author, err := config.Models.Resolve(input.TesterModel)
-		if err != nil {
-			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "unknown test-writer model"})
-			return
-		}
-		signature, err := config.Draft.Suggest(request.Context(), author, input.Spec)
-		if err != nil {
-			writeJSON(writer, http.StatusBadGateway, errorResponse{Error: "signature drafting failed"})
-			return
-		}
-		writeJSON(writer, http.StatusOK, signatureDraftResponse{Signature: signature, Model: input.TesterModel})
-	})
+	mux.HandleFunc("POST /signature-draft", signatureDraftHandler(config))
 	mux.HandleFunc("POST /run", func(writer http.ResponseWriter, request *http.Request) {
 		input, err := decodeRunRequest(writer, request)
 		if err != nil {
@@ -292,6 +265,79 @@ func registerLegacyAPI(mux *http.ServeMux, config Config, starts *startRegistry)
 	mux.HandleFunc("GET /run/{id}", func(writer http.ResponseWriter, request *http.Request) {
 		getRun(writer, request, config.Store)
 	})
+}
+
+func signatureDraftHandler(config Config) http.HandlerFunc {
+	return func(writer http.ResponseWriter, request *http.Request) {
+		startedAt := time.Now()
+		input, err := decodeSignatureDraftRequest(writer, request)
+		if err != nil {
+			config.Logger.Warn("signature draft rejected", "reason", "invalid_request")
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: err.Error()})
+			return
+		}
+		author, err := config.Models.Resolve(input.TesterModel)
+		if err != nil {
+			config.Logger.Warn("signature draft rejected", "model", input.TesterModel, "reason", "unknown_model")
+			writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "unknown test-writer model"})
+			return
+		}
+
+		config.Logger.Info("signature draft started", "model", input.TesterModel, "spec_bytes", len(input.Spec))
+		signature, err := config.Draft.Suggest(request.Context(), author, input.Spec)
+		if err != nil {
+			failure := classifySignatureDraftFailure(err)
+			attrs := []any{
+				"model", input.TesterModel,
+				"spec_bytes", len(input.Spec),
+				"failure_kind", failure.kind,
+				"duration", time.Since(startedAt),
+			}
+			if failure.providerStatus != 0 {
+				attrs = append(attrs, "provider_status", failure.providerStatus)
+			}
+			config.Logger.Warn("signature draft failed", attrs...)
+			writeJSON(writer, http.StatusBadGateway, errorResponse{Error: failure.publicMessage})
+			return
+		}
+		config.Logger.Info("signature draft succeeded",
+			"model", input.TesterModel,
+			"spec_bytes", len(input.Spec),
+			"signature_bytes", len(signature),
+			"duration", time.Since(startedAt),
+		)
+		writeJSON(writer, http.StatusOK, signatureDraftResponse{Signature: signature, Model: input.TesterModel})
+	}
+}
+
+type signatureDraftFailure struct {
+	kind           string
+	providerStatus int
+	publicMessage  string
+}
+
+func classifySignatureDraftFailure(err error) signatureDraftFailure {
+	if errors.Is(err, context.Canceled) {
+		return signatureDraftFailure{kind: "canceled", publicMessage: "signature drafting was canceled"}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return signatureDraftFailure{kind: "deadline_exceeded", publicMessage: "signature drafting timed out; check the server log"}
+	}
+	if errors.Is(err, draft.ErrResponseTooLarge) {
+		return signatureDraftFailure{kind: "response_too_large", publicMessage: "signature drafting failed because the provider response was too large"}
+	}
+	if errors.Is(err, draft.ErrInvalidSignature) {
+		return signatureDraftFailure{kind: "invalid_provider_output", publicMessage: "signature drafting failed because the provider did not return a valid Go signature"}
+	}
+	var providerErr *llm.HTTPStatusError
+	if errors.As(err, &providerErr) {
+		return signatureDraftFailure{
+			kind:           "provider_http",
+			providerStatus: providerErr.StatusCode,
+			publicMessage:  fmt.Sprintf("signature drafting failed: provider returned HTTP %d; check the server log", providerErr.StatusCode),
+		}
+	}
+	return signatureDraftFailure{kind: "provider_transport", publicMessage: "signature drafting failed while contacting the provider; check the server log"}
 }
 
 func cancelRun(writer http.ResponseWriter, request *http.Request, store *run.Store) {
@@ -598,6 +644,51 @@ func validateFunctionSignature(signature string) error {
 		return fmt.Errorf("Go function signature is invalid: %w", err)
 	}
 	return nil
+}
+
+func withRequestLogging(next http.Handler, logger *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		startedAt := time.Now()
+		observed := &observedResponseWriter{ResponseWriter: writer}
+		next.ServeHTTP(observed, request)
+		if observed.status == 0 {
+			observed.status = http.StatusOK
+		}
+		level := slog.LevelDebug
+		if request.Method != http.MethodGet && observed.status < http.StatusBadRequest {
+			level = slog.LevelInfo
+		}
+		if observed.status >= http.StatusInternalServerError {
+			level = slog.LevelError
+		} else if observed.status >= http.StatusBadRequest {
+			level = slog.LevelWarn
+		}
+		logger.Log(request.Context(), level, "http request completed",
+			"method", request.Method,
+			"path", request.URL.Path,
+			"status", observed.status,
+			"duration", time.Since(startedAt),
+		)
+	})
+}
+
+type observedResponseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (writer *observedResponseWriter) WriteHeader(status int) {
+	if writer.status == 0 {
+		writer.status = status
+	}
+	writer.ResponseWriter.WriteHeader(status)
+}
+
+func (writer *observedResponseWriter) Write(contents []byte) (int, error) {
+	if writer.status == 0 {
+		writer.WriteHeader(http.StatusOK)
+	}
+	return writer.ResponseWriter.Write(contents)
 }
 
 func writeJSON(writer http.ResponseWriter, status int, value any) {

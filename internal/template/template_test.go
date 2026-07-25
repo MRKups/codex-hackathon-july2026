@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -67,6 +68,32 @@ func TestRepositoryCreateLoadListAndUpdate(t *testing.T) {
 	text := string(contents)
 	if !strings.Contains(text, `"version":"v1"`) || strings.Contains(text, "digest") || strings.Contains(text, "testCode") {
 		t.Fatalf("template.json = %s, want only versioned source-free task content", text)
+	}
+}
+
+func TestCommittedStarterTemplatesAreLoadable(t *testing.T) {
+	repository, err := New(Config{Root: filepath.Join("..", "..", "templates")})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	templates, err := repository.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	got := make([]string, 0, len(templates))
+	for _, template := range templates {
+		got = append(got, template.ID)
+	}
+	want := []string{
+		"dedupe-strings",
+		"reverse-ascii",
+		"semver-compare",
+		"split-cents",
+		"word-wrap",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("starter template IDs = %v, want %v", got, want)
 	}
 }
 

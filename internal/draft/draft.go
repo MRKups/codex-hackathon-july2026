@@ -14,6 +14,13 @@ import (
 
 const maxResponseBytes = 2 << 10
 
+var (
+	// ErrResponseTooLarge means a model reply exceeded the narrow draft-response limit.
+	ErrResponseTooLarge = errors.New("signature draft response is too large")
+	// ErrInvalidSignature means a model reply did not contain one valid bodyless Go signature.
+	ErrInvalidSignature = errors.New("signature draft response is invalid")
+)
+
 // Service performs the narrow signature-drafting operation. It has no dependency on oracle,
 // repair, run, or server packages.
 type Service struct{}
@@ -47,11 +54,11 @@ func (service *Service) Suggest(ctx context.Context, author llm.LLM, spec string
 		return "", err
 	}
 	if len(raw) > maxResponseBytes {
-		return "", fmt.Errorf("signature draft exceeds %d bytes", maxResponseBytes)
+		return "", fmt.Errorf("%w: exceeds %d bytes", ErrResponseTooLarge, maxResponseBytes)
 	}
 	signature := strings.TrimSpace(prompt.ExtractGoCode(raw))
 	if err := domain.ValidateSignature(signature); err != nil {
-		return "", fmt.Errorf("invalid signature draft: %w", err)
+		return "", fmt.Errorf("%w: %v", ErrInvalidSignature, err)
 	}
 	return signature, nil
 }

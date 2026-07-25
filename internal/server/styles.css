@@ -35,9 +35,18 @@ pre { overflow: auto; margin: 0; padding: 12px; border: 1px solid #d0d5dd; borde
 .item p { margin-bottom: 0; }
 .id, .status { color: #667085; font: .78rem ui-monospace, SFMono-Regular, Menlo, monospace; }
 .notice { min-height: 1.4em; color: #475467; }
+.run-progress { display: grid; gap: 7px; margin: 14px 0; }
+.progress-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.progress-track { height: 7px; overflow: hidden; border-radius: 99px; background: #e4e7ec; }
+.progress-fill { width: 38%; height: 100%; border-radius: inherit; background: #667085; transform: translateX(-110%); }
+.run-progress.active .progress-fill { background: linear-gradient(90deg, #475467, #98a2b3, #475467); animation: run-activity 1.15s ease-in-out infinite; }
+.run-progress.passed .progress-fill { width: 100%; transform: none; background: #067647; }
+.run-progress.failed .progress-fill { width: 100%; transform: none; background: #b42318; }
+@keyframes run-activity { from { transform: translateX(-110%); } to { transform: translateX(290%); } }
 .error { color: #b42318; }
 .good { color: #067647; }
 .hidden { display: none; }
 details { margin-top: 12px; }
 summary { cursor: pointer; font-weight: 650; }
 @media (max-width: 680px) { main { width: min(100% - 24px, 1040px); padding-top: 18px; } .header, .two { display: grid; grid-template-columns: 1fr; } .nav { order: -1; } }
+@media (prefers-reduced-motion: reduce) { .run-progress.active .progress-fill { animation: none; transform: translateX(80%); } }

@@ -5,10 +5,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/lmittmann/tint"
 
 	"codex-hackathon-july2026/internal/domain"
 	"codex-hackathon-july2026/internal/draft"
@@ -32,6 +36,8 @@ func main() {
 	var address string
 	var maxAttempts int
 	var oracleAttempts int
+	var logLevel string
+	var logColor string
 	var runTimeout time.Duration
 	var serve bool
 	var templatesDir string
@@ -39,13 +45,15 @@ func main() {
 	flag.StringVar(&address, "addr", "127.0.0.1:8080", "address for the browser demo server")
 	flag.IntVar(&maxAttempts, "attempts", 3, "maximum number of coder attempts")
 	flag.IntVar(&oracleAttempts, "oracle-attempts", 2, "maximum generated-oracle attempts before oraclefailed")
+	flag.StringVar(&logLevel, "log-level", "info", "minimum stderr log level: debug, info, warn, or error")
+	flag.StringVar(&logColor, "log-color", "auto", "stderr log color: auto, always, or never")
 	flag.DurationVar(&runTimeout, "run-timeout", 150*time.Second, "maximum duration of one browser verification run")
 	flag.BoolVar(&serve, "serve", false, "serve the browser demo instead of running once in the terminal")
 	flag.StringVar(&templatesDir, "templates-dir", "templates", "project-root directory for source-free task templates")
 	flag.DurationVar(&verifierTimeout, "verifier-timeout", 10*time.Second, "timeout for one oracle preflight or candidate verification")
 	flag.Parse()
 	if flag.NArg() != 0 {
-		fmt.Fprintf(os.Stderr, "usage: %s [-serve] [-addr ADDRESS] [-attempts N] [-oracle-attempts N] [-run-timeout DURATION] [-templates-dir DIRECTORY] [-verifier-timeout DURATION]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "usage: %s [-serve] [-addr ADDRESS] [-attempts N] [-oracle-attempts N] [-log-level LEVEL] [-log-color MODE] [-run-timeout DURATION] [-templates-dir DIRECTORY] [-verifier-timeout DURATION]\n", os.Args[0])
 		os.Exit(2)
 	}
 	if maxAttempts <= 0 {
@@ -62,6 +70,10 @@ func main() {
 	}
 	if strings.TrimSpace(address) == "" {
 		exitFailure("configuration error", fmt.Errorf("server address must not be empty"))
+	}
+	logger, err := configuredLogger(logLevel, logColor)
+	if err != nil {
+		exitFailure("configuration error", err)
 	}
 	resolver, err := oracle.NewResolver(oracle.Config{
 		MaxAttempts:      oracleAttempts,
@@ -87,7 +99,7 @@ func main() {
 		exitFailure("configuration error", err)
 	}
 	if serve {
-		serveBrowser(address, templatesDir, models, resolver, executor, maxAttempts, verifierTimeout, runTimeout)
+		serveBrowser(address, templatesDir, models, resolver, executor, maxAttempts, verifierTimeout, runTimeout, logger)
 		return
 	}
 	coder, err := models.catalog.Resolve(models.coder)
@@ -126,11 +138,12 @@ func main() {
 	fmt.Printf("gave up after %d attempt(s)\n", final.N)
 }
 
-func serveBrowser(address, templatesDir string, models modelSettings, resolver oracle.Resolver, executor repair.Executor, maxAttempts int, verifierTimeout, runTimeout time.Duration) {
+func serveBrowser(address, templatesDir string, models modelSettings, resolver oracle.Resolver, executor repair.Executor, maxAttempts int, verifierTimeout, runTimeout time.Duration, logger *slog.Logger) {
 	store, err := run.NewStore(run.Config{
 		MaxAttempts: maxAttempts,
 		TestTimeout: verifierTimeout,
 		RunTimeout:  runTimeout,
+		Logger:      logger,
 	}, resolver, executor)
 	if err != nil {
 		exitFailure("configuration error", err)
@@ -150,14 +163,52 @@ func serveBrowser(address, templatesDir string, models modelSettings, resolver o
 		},
 		ReviewerModel: models.reviewer,
 		Presets:       browserPresets(),
+		Logger:        logger,
 	})
 	if err != nil {
 		exitFailure("server configuration error", err)
 	}
 
+	logger.Info("browser server starting", "address", address, "templates_dir", templates.Root())
 	fmt.Printf("Test Verifier browser application: http://%s\n", address)
 	if err := http.ListenAndServe(address, handler); err != nil {
 		exitFailure("browser server failure", err)
+	}
+}
+
+func configuredLogger(levelValue, colorValue string) (*slog.Logger, error) {
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(strings.TrimSpace(levelValue))); err != nil {
+		return nil, fmt.Errorf("parse log level: %w", err)
+	}
+	color, err := logColorEnabled(colorValue)
+	if err != nil {
+		return nil, err
+	}
+	return newLogger(os.Stderr, level, color), nil
+}
+
+func newLogger(writer io.Writer, level slog.Level, color bool) *slog.Logger {
+	return slog.New(tint.NewHandler(writer, &tint.Options{Level: level, NoColor: !color}))
+}
+
+func logColorEnabled(value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "always":
+		return true, nil
+	case "never":
+		return false, nil
+	case "auto":
+		if os.Getenv("NO_COLOR") != "" {
+			return false, nil
+		}
+		info, err := os.Stderr.Stat()
+		if err != nil {
+			return false, fmt.Errorf("inspect stderr for log color: %w", err)
+		}
+		return info.Mode()&os.ModeCharDevice != 0, nil
+	default:
+		return false, fmt.Errorf("log color must be auto, always, or never")
 	}
 }
 

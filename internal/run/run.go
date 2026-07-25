@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -54,6 +55,7 @@ type Config struct {
 	MaxAttempts int
 	TestTimeout time.Duration
 	RunTimeout  time.Duration
+	Logger      *slog.Logger
 }
 
 // Roles is the per-run set of independently selected model clients. Tester and reviewer are
@@ -105,6 +107,7 @@ type Store struct {
 	config   Config
 	resolver oracle.Resolver
 	executor repair.Executor
+	logger   *slog.Logger
 
 	mu          sync.RWMutex
 	nextID      uint64
@@ -126,6 +129,9 @@ func NewStore(config Config, resolver oracle.Resolver, executor repair.Executor)
 	if config.RunTimeout <= 0 {
 		return nil, errors.New("run timeout must be greater than zero")
 	}
+	if config.Logger == nil {
+		return nil, errors.New("run logger is required")
+	}
 	if resolver == nil {
 		return nil, errors.New("oracle resolver is required")
 	}
@@ -137,6 +143,7 @@ func NewStore(config Config, resolver oracle.Resolver, executor repair.Executor)
 		config:   config,
 		resolver: resolver,
 		executor: executor,
+		logger:   config.Logger,
 		runs:     make(map[string]*Run),
 		cancels:  make(map[string]context.CancelFunc),
 	}, nil
@@ -166,8 +173,8 @@ func (store *Store) StartRunWithTemplate(task domain.Task, roles Roles, provenan
 	deadlineAt := startedAt.Add(store.config.RunTimeout)
 
 	store.mu.Lock()
-	defer store.mu.Unlock()
 	if store.activeRunID != "" {
+		store.mu.Unlock()
 		return "", ErrRunActive
 	}
 
@@ -202,6 +209,20 @@ func (store *Store) StartRunWithTemplate(task domain.Task, roles Roles, provenan
 	}
 	store.cancels[id] = cancel
 	store.activeRunID = id
+	store.mu.Unlock()
+
+	store.logger.Info("run started",
+		"run_id", id,
+		"oracle", mode,
+		"template_id", provenance.ID,
+		"template_digest", provenance.Digest,
+		"coder_model", roles.CoderModel,
+		"tester_model", roles.TesterModel,
+		"reviewer_model", roles.ReviewerModel,
+		"max_attempts", store.config.MaxAttempts,
+		"spec_bytes", len(task.Spec),
+		"signature_bytes", len(task.Signature),
+	)
 
 	go store.execute(ctx, cancel, id, task, roles)
 	return id, nil
@@ -330,6 +351,7 @@ func (store *Store) CancelRun(id string) (found, canceled bool) {
 	stored.Stage = PhaseCanceling
 	cancel()
 	store.mu.Unlock()
+	store.logger.Info("run cancellation requested", "run_id", id)
 
 	return true, true
 }
@@ -391,7 +413,6 @@ func (store *Store) execute(ctx context.Context, cancel context.CancelFunc, id s
 	}
 
 	store.mu.Lock()
-	defer store.mu.Unlock()
 	delete(store.cancels, id)
 	if store.activeRunID == id {
 		store.activeRunID = ""
@@ -399,49 +420,73 @@ func (store *Store) execute(ctx context.Context, cancel context.CancelFunc, id s
 
 	stored, found := store.runs[id]
 	if !found {
+		store.mu.Unlock()
 		return
 	}
 	stored.Stage = PhaseComplete
+	failureKind := ""
 	if ctx.Err() == context.Canceled {
 		stored.Status = StatusCanceled
 		stored.Error = "run canceled"
-		return
-	}
-	if ctx.Err() == context.DeadlineExceeded {
+		failureKind = "canceled"
+	} else if ctx.Err() == context.DeadlineExceeded {
 		stored.Status = StatusTimedOut
 		stored.Error = fmt.Sprintf("run timed out after %s", store.config.RunTimeout)
-		return
-	}
-	var oracleFailure *oracle.OracleFailureError
-	if errors.As(err, &oracleFailure) {
-		if evidenceErr := oracle.ValidateFailureEvidence(task, oracleFailure.Evidence); evidenceErr != nil {
+		failureKind = "deadline_exceeded"
+	} else {
+		var oracleFailure *oracle.OracleFailureError
+		if errors.As(err, &oracleFailure) {
+			if evidenceErr := oracle.ValidateFailureEvidence(task, oracleFailure.Evidence); evidenceErr != nil {
+				stored.Status = StatusInfrastructureFailed
+				stored.Error = fmt.Sprintf("validate oracle failure evidence: %v", evidenceErr)
+				failureKind = "invalid_oracle_failure_evidence"
+			} else {
+				stored.OracleEvidence = oracleFailure.Evidence.Clone()
+				stored.Status = StatusOracleFailed
+				stored.Error = oracleFailure.Error()
+				failureKind = "oracle_failure"
+			}
+		} else if err != nil {
 			stored.Status = StatusInfrastructureFailed
-			stored.Error = fmt.Sprintf("validate oracle failure evidence: %v", evidenceErr)
-			return
+			stored.Error = err.Error()
+			failureKind = infrastructureFailureKind(err)
+		} else if final.Passed {
+			stored.Status = StatusPassed
+		} else {
+			stored.Status = StatusGaveUp
 		}
-		stored.OracleEvidence = oracleFailure.Evidence.Clone()
-		stored.Status = StatusOracleFailed
-		stored.Error = oracleFailure.Error()
-		return
 	}
-	if err != nil {
-		stored.Status = StatusInfrastructureFailed
-		stored.Error = err.Error()
-		return
+	status := stored.Status
+	attempts := len(stored.Attempts)
+	duration := time.Since(stored.StartedAt)
+	store.mu.Unlock()
+
+	attrs := []any{
+		"run_id", id,
+		"status", status,
+		"attempts", attempts,
+		"duration", duration,
 	}
-	if final.Passed {
-		stored.Status = StatusPassed
-		return
+	if failureKind != "" {
+		attrs = append(attrs, "failure_kind", failureKind)
 	}
-	stored.Status = StatusGaveUp
+	var providerErr *llm.HTTPStatusError
+	if errors.As(err, &providerErr) {
+		attrs = append(attrs, "provider_status", providerErr.StatusCode)
+	}
+	store.logger.Info("run finished", attrs...)
 }
 
 func (store *Store) setPhase(id string, phase Phase) {
 	store.mu.Lock()
-	defer store.mu.Unlock()
 
 	stored, found := store.runs[id]
 	if !found || stored.Status != StatusRunning || stored.Stage == PhaseCanceling {
+		store.mu.Unlock()
+		return
+	}
+	if stored.Stage == phase {
+		store.mu.Unlock()
 		return
 	}
 	stored.Stage = phase
@@ -451,6 +496,9 @@ func (store *Store) setPhase(id string, phase Phase) {
 	default:
 		stored.CurrentAttempt = len(stored.Attempts) + 1
 	}
+	attempt := stored.CurrentAttempt
+	store.mu.Unlock()
+	store.logger.Info("run phase changed", "run_id", id, "phase", phase, "current_attempt", attempt)
 }
 
 func (store *Store) setResolution(ctx context.Context, id string, resolution oracle.Resolution) bool {
@@ -468,18 +516,47 @@ func (store *Store) setResolution(ctx context.Context, id string, resolution ora
 	stored.TestCode = bundle.TestCode
 	stored.Verification = bundle.Manifest
 	stored.OracleEvidence = resolution.Evidence.Clone()
+	store.logger.Info("run oracle frozen",
+		"run_id", id,
+		"origin", bundle.Manifest.Origin,
+		"bundle_digest", bundle.Manifest.Digest,
+		"task_digest", bundle.Manifest.TaskDigest,
+		"test_bytes", len(bundle.TestCode),
+	)
 	return true
 }
 
 func (store *Store) appendAttempt(id string, attempt domain.Attempt) {
 	store.mu.Lock()
-	defer store.mu.Unlock()
 
 	stored, found := store.runs[id]
 	if !found || stored.Status != StatusRunning || stored.Stage == PhaseCanceling {
+		store.mu.Unlock()
 		return
 	}
 	stored.Attempts = append(stored.Attempts, attempt)
+	store.mu.Unlock()
+	store.logger.Info("run attempt finished",
+		"run_id", id,
+		"attempt", attempt.N,
+		"passed", attempt.Passed,
+		"candidate_bytes", len(attempt.Code),
+		"verifier_output_bytes", len(attempt.Output),
+	)
+}
+
+func infrastructureFailureKind(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline_exceeded"
+	}
+	var providerErr *llm.HTTPStatusError
+	if errors.As(err, &providerErr) {
+		return "provider_http"
+	}
+	return "infrastructure"
 }
 
 type progressCoder struct {

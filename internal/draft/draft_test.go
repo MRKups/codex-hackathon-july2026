@@ -21,9 +21,16 @@ func TestSuggestReturnsOnlyValidatedSignature(t *testing.T) {
 }
 
 func TestSuggestRejectsInvalidOrOversizedOutput(t *testing.T) {
-	for _, response := range []string{"func Broken(value Missing) int", "package solution\nfunc Solve() int { return 1 }", strings.Repeat("x", maxResponseBytes+1)} {
-		if _, err := NewService().Suggest(context.Background(), staticLLM{response: response}, "Return one."); err == nil {
-			t.Fatalf("Suggest(%q) error = nil", response[:min(len(response), 32)])
+	for _, test := range []struct {
+		response string
+		want     error
+	}{
+		{response: "func Broken(value Missing) int", want: ErrInvalidSignature},
+		{response: "package solution\nfunc Solve() int { return 1 }", want: ErrInvalidSignature},
+		{response: strings.Repeat("x", maxResponseBytes+1), want: ErrResponseTooLarge},
+	} {
+		if _, err := NewService().Suggest(context.Background(), staticLLM{response: test.response}, "Return one."); !errors.Is(err, test.want) {
+			t.Fatalf("Suggest(%q) error = %v, want errors.Is(_, %v)", test.response[:min(len(test.response), 32)], err, test.want)
 		}
 	}
 }

@@ -141,6 +141,16 @@ does not create verification evidence.
 | `LLM_MODEL_REVIEWER` | Optional bounded oracle-reviewer model; falls back to the effective test-writer model and is not browser-selectable. |
 | `LLM_TIMEOUT` | Whole-call timeout for one completion. |
 
+The composition root additionally accepts `-log-level` (`debug`, `info`, `warn`, or `error`) and
+`-log-color` (`auto`, `always`, or `never`), then writes structured `slog` diagnostics through the
+small `tint` handler to stderr. `auto` colors an interactive stderr and honors `NO_COLOR`. The
+logger is injected explicitly into `server` and `run`; neither package creates a provider client,
+reads an environment variable, or writes a prompt/source body to logs. Request events include
+method/path/status/duration. Signature drafting adds safe result categories and provider HTTP
+status when available. Run events include IDs, phase, model IDs, byte counts, manifest/template
+digests, cancellation, and terminal status. Logs never contain task or source content, request
+bodies, raw provider replies, endpoints, headers, or credentials.
+
 `internal/llm.ModelCatalog` is provider-agnostic. It asks an injected `ClientFactory` for one
 reusable client per configured model ID and rejects an empty or unknown selection. It deliberately
 does not query a provider’s model endpoint or hardcode vendor model names. Role separation and
@@ -341,7 +351,9 @@ verifier data, never HTML insertion. The spartan multi-page workflow separates c
 - `/runs` displays the selected template read-only, limits choices to configured coder/tester
   models, and starts no work until an explicit launch.
 - `/runs/{id}` polls one evidence record, supports cancellation while live, and exposes frozen
-  oracle source, manifest/digests, attempts, capped output, and final JSON download.
+  oracle source, manifest/digests, attempts, capped output, and final JSON download. While live,
+  it displays the server-owned phase, an elapsed timer, and animated indeterminate activity—not a
+  guessed completion percentage—then stops on the actual terminal result.
 - Downloaded JSON is the final accepted-evidence snapshot; rejected oracle candidates and raw
   provider wrapper replies are not retained, and there is no disk persistence yet.
 

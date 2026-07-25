@@ -11,11 +11,11 @@ mechanism and are not a second product name.
 ├── .gitignore
 ├── AGENTS.md                     # Guardrails and package direction
 ├── README.md                     # Setup and browser/terminal use
-├── go.mod                        # Go 1.26 module; pinned official OpenAI Go SDK
+├── go.mod                        # Go 1.26 module; OpenAI SDK plus narrow tint log-handler exception
 ├── go.sum
 ├── cmd/
 │   └── repair/
-│       ├── main.go               # Composition root, flags, model roles, template-root wiring
+│       ├── main.go               # Composition root, flags, model roles, template-root/log wiring
 │       └── main_test.go
 ├── challenges/
 │   └── pi-prime-chunks.md         # Standalone challenge specification; not runtime verifier code
@@ -58,17 +58,17 @@ mechanism and are not a second product name.
 │   │   ├── verifier.go           # Source-free compiled-binary verifier, sentinel, output cap
 │   │   └── repair_test.go
 │   ├── run/
-│   │   ├── run.go                # In-memory per-run state, phases, cancel, active-run guard
+│   │   ├── run.go                # In-memory state, lifecycle/cancel guard, safe run slog events
 │   │   └── run_test.go
 │   └── server/
 │       ├── assets.go             # Embeds and serves explicit static routes/assets
 │       ├── templates.html        # Template library page
 │       ├── template.html         # New/edit template authoring page
 │       ├── runs.html             # Template launch and current-process runs page
-│       ├── run.html              # One immutable run-analysis page
-│       ├── styles.css            # Shared spartan browser styling
+│       ├── run.html              # Run analysis with truthful live phase/activity feedback
+│       ├── styles.css            # Shared spartan browser styling and indeterminate activity motion
 │       ├── index.html            # Superseded one-screen page retained as history
-│       ├── server.go             # /api template/run handlers and page routes
+│       ├── server.go             # /api/page routes, safe draft failures, request slog events
 │       └── server_test.go
 ├── docs/
 │   ├── go-repair-loop.md         # Test Verifier system design and behavior contract
@@ -76,6 +76,12 @@ mechanism and are not a second product name.
 │   ├── design-change-2026-07-18.md
 │   ├── file-structure.md         # This file
 │   └── tracker.md                # Completed and remaining work
+├── templates/                    # Versioned, source-free starter task templates
+│   ├── dedupe-strings/template.json
+│   ├── reverse-ascii/template.json
+│   ├── semver-compare/template.json
+│   ├── split-cents/template.json
+│   └── word-wrap/template.json
 └── _archive/
     ├── llm/
     │   ├── client.go             # Superseded handwritten provider transport

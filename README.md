@@ -174,6 +174,8 @@ go run ./cmd/repair -serve \
   -oracle-attempts 2 \
   -verifier-timeout 10s \
   -run-timeout 2m30s \
+  -log-level info \
+  -log-color auto \
   -templates-dir templates
 ```
 
@@ -182,10 +184,12 @@ local address. Press `Ctrl-C` to stop the server.
 
 To use it:
 
-1. Open **Templates**, create a source-free task template, and save its name, specification, and
-   confirmed Go signature under `templates/<id>/template.json`. You may request a syntax-valid
-   signature draft from the selected test-writer model, then explicitly apply or edit it; drafting
-   never starts a run.
+1. Open **Templates**. The repository includes five editable starter templates: Split cents, Word
+   wrap, Compare semantic versions, Reverse ASCII text, and Deduplicate strings. Create another
+   source-free task template—or edit a starter—and save its name, specification, and confirmed Go
+   signature under `templates/<id>/template.json`. You may request a syntax-valid signature draft
+   from the selected test-writer model, then explicitly apply or edit it; drafting never starts a
+   run.
 2. Open **Runs**, select the saved template, and choose locally configured code-writer and
    test-writer models. The server uses its configured reviewer model, falling back to the
    test-writer model when unset.
@@ -210,6 +214,12 @@ The limits have separate jobs:
 
 A cancellation, timeout, `oraclefailed`, or infrastructure failure is not a verdict that a
 candidate implementation is wrong.
+
+The server writes colored structured operational events to an interactive stderr. Set
+`-log-level debug` while diagnosing a local issue; use `-log-color never` for a plain redirected
+log or `-log-color always` when a terminal detector is unavailable. Logs identify HTTP status, selected model, durations, safe
+signature-draft failure categories, and run phases without recording specifications, prompts,
+source code, provider responses, endpoints, or credentials.
 
 ## Run the authored terminal control
 

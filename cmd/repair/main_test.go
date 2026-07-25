@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,6 +137,61 @@ func TestConfiguredClientFactoryRejectsUnknownProvider(t *testing.T) {
 	_, err := configuredClientFactory(llm.Config{Provider: "unknown", Model: "model", Timeout: time.Second})
 	if err == nil {
 		t.Fatal("configuredClientFactory() error = nil, want unsupported provider error")
+	}
+}
+
+func TestConfiguredLoggerValidatesLevel(t *testing.T) {
+	logger, err := configuredLogger("debug", "never")
+	if err != nil {
+		t.Fatalf("configuredLogger(debug) error = %v", err)
+	}
+	if !logger.Enabled(context.Background(), slog.LevelDebug) {
+		t.Fatal("debug logger does not enable debug events")
+	}
+	if _, err := configuredLogger("verbose", "never"); err == nil {
+		t.Fatal("configuredLogger(verbose) error = nil, want validation failure")
+	}
+}
+
+func TestLogColorEnabled(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  bool
+	}{
+		{value: "always", want: true},
+		{value: "never", want: false},
+	} {
+		got, err := logColorEnabled(test.value)
+		if err != nil || got != test.want {
+			t.Fatalf("logColorEnabled(%q) = (%t, %v), want (%t, nil)", test.value, got, err, test.want)
+		}
+	}
+	t.Setenv("NO_COLOR", "1")
+	if got, err := logColorEnabled("auto"); err != nil || got {
+		t.Fatalf("logColorEnabled(auto) with NO_COLOR = (%t, %v), want (false, nil)", got, err)
+	}
+	if _, err := logColorEnabled("sometimes"); err == nil {
+		t.Fatal("logColorEnabled(sometimes) error = nil, want validation failure")
+	}
+}
+
+func TestTintLoggerHonorsColorMode(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		color      bool
+		wantEscape bool
+	}{
+		{name: "color", color: true, wantEscape: true},
+		{name: "plain", color: false, wantEscape: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			newLogger(&output, slog.LevelInfo, test.color).Info("human readable event", "run_id", "run_000001")
+			got := output.String()
+			if strings.Contains(got, "\x1b[") != test.wantEscape {
+				t.Fatalf("log output %q has color=%t, want %t", got, strings.Contains(got, "\x1b["), test.wantEscape)
+			}
+		})
 	}
 }
 
