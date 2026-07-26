@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 
 	"codex-hackathon-july2026/internal/domain"
@@ -15,6 +18,39 @@ import (
 // BundleVersionV1 is the first stable manifest schema. A bundle's digest covers this version so
 // a later schema cannot silently change the meaning of a recorded run.
 const BundleVersionV1 = "verification-bundle/v1"
+
+// TestInventory is a deliberately mechanical description of frozen Go test source. It makes no
+// claim about test semantics, case counts, or coverage; its names are only an audit aid for a
+// person reading one run.
+type TestInventory struct {
+	TopLevelTests []string `json:"topLevelTests"`
+}
+
+// Clone returns a value whose test-name slice cannot be mutated through a published snapshot.
+func (inventory TestInventory) Clone() TestInventory {
+	inventory.TopLevelTests = append([]string(nil), inventory.TopLevelTests...)
+	return inventory
+}
+
+// InspectTestSource returns top-level declarations whose names begin Test. It is an optional,
+// post-freeze display aid: parsing failure yields an empty inventory so this function can never
+// change bundle admission, digesting, or execution semantics.
+func InspectTestSource(testCode string) TestInventory {
+	file, err := parser.ParseFile(token.NewFileSet(), "solution_test.go", testCode, 0)
+	if err != nil {
+		return TestInventory{}
+	}
+
+	inventory := TestInventory{TopLevelTests: make([]string, 0)}
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Recv != nil || function.Name == nil || !strings.HasPrefix(function.Name.Name, "Test") {
+			continue
+		}
+		inventory.TopLevelTests = append(inventory.TopLevelTests, function.Name.Name)
+	}
+	return inventory
+}
 
 // AuthoredSource seals trusted caller-owned test source. It records provenance, but does not
 // infer semantic quality or a case count from arbitrary Go source.

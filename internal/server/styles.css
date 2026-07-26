@@ -27,9 +27,21 @@ pre { overflow: auto; margin: 0; padding: 12px; border: 1px solid #d0d5dd; borde
 .nav a { color: #475467; font-size: .9rem; text-underline-offset: 3px; }
 .muted { color: #667085; line-height: 1.5; }
 .panel { margin-top: 20px; padding: 18px; border: 1px solid #d0d5dd; border-radius: 5px; background: #fff; }
+.result-panel { border-color: #b8c1cc; }
 .grid { display: grid; gap: 14px; }
 .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .list { display: grid; gap: 10px; }
+.lead { max-width: 72ch; margin-bottom: 12px; font-size: 1.03rem; line-height: 1.55; }
+.evidence-list { display: grid; gap: 7px; margin: 0; padding-left: 20px; line-height: 1.45; }
+.evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.evidence-card { padding: 10px 11px; border: 1px solid #d0d5dd; border-radius: 4px; background: #fbfbfa; white-space: pre-line; font: .83rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.review-notes { margin-top: 15px; }
+.review-notes h3 { margin-bottom: 5px; }
+.contract { display: grid; gap: 8px; }
+.contract h3 { margin: 4px 0 0; }
+.evidence-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 14px; margin: 12px 0 0; }
+.evidence-facts dt { color: #475467; font-weight: 650; }
+.evidence-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .item { display: block; padding: 15px; border: 1px solid #d0d5dd; border-radius: 4px; background: #fff; text-decoration: none; }
 .item:hover { border-color: #667085; }
 .item p { margin-bottom: 0; }
@@ -48,5 +60,5 @@ pre { overflow: auto; margin: 0; padding: 12px; border: 1px solid #d0d5dd; borde
 .hidden { display: none; }
 details { margin-top: 12px; }
 summary { cursor: pointer; font-weight: 650; }
-@media (max-width: 680px) { main { width: min(100% - 24px, 1040px); padding-top: 18px; } .header, .two { display: grid; grid-template-columns: 1fr; } .nav { order: -1; } }
+@media (max-width: 680px) { main { width: min(100% - 24px, 1040px); padding-top: 18px; } .header, .two, .evidence-grid { display: grid; grid-template-columns: 1fr; } .nav { order: -1; } .evidence-facts { grid-template-columns: 1fr; gap: 2px; } .evidence-facts dd { margin-bottom: 8px; } }
 @media (prefers-reduced-motion: reduce) { .run-progress.active .progress-fill { animation: none; transform: translateX(80%); } }

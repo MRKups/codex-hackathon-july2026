@@ -297,6 +297,15 @@ bundle is also evidence about its fixed source, not a universal correctness clai
 is a final accepted-evidence snapshot, not a server-persistent event log: it omits rejected oracle
 candidates and provider wrapper replies.
 
+The run-detail page leads with a generic evidence interpretation, not raw source. Its task
+contract, bundle provenance, author/reviewer lifecycle, bounded review findings, parser-derived
+top-level Go declarations named `Test…`, and candidate execution stages are mechanically supported facts. It
+does not infer a task-family test strategy, rate semantic test quality, or assign a correctness
+confidence score. Raw test/candidate source, capped output, and digests remain expandable audit
+material. A silent successful Go test binary is displayed as a success explanation rather than
+missing output: it means the candidate built, the frozen test binary completed, and its reached
+assertions did not fail.
+
 ## Configuration and limits
 
 | Setting | Purpose |

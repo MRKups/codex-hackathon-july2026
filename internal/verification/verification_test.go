@@ -97,3 +97,23 @@ func TestSourceSealingRejectsEmptyTestCode(t *testing.T) {
 		t.Fatalf("GeneratedSource(empty) error = %v, want empty-source rejection", err)
 	}
 }
+
+func TestInspectTestSourceListsOnlyTopLevelTestFunctions(t *testing.T) {
+	inventory := InspectTestSource(`package solution
+
+import "testing"
+
+func TestFirst(t *testing.T) {}
+func TestSecond(t *testing.T) {}
+func helper(t *testing.T) {}
+func (thing) TestMethod(t *testing.T) {}
+`)
+	if got, want := strings.Join(inventory.TopLevelTests, ","), "TestFirst,TestSecond"; got != want {
+		t.Fatalf("top-level tests = %q, want %q", got, want)
+	}
+
+	broken := InspectTestSource("package solution\nfunc TestBroken(")
+	if len(broken.TopLevelTests) != 0 {
+		t.Fatalf("broken source inventory = %#v, want empty", broken)
+	}
+}

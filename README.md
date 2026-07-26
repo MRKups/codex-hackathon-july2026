@@ -86,10 +86,11 @@ executor, and wires the HTTP server to the in-memory run store. The run store pe
 explicit resolver → validated frozen snapshot → candidate-executor sequence. Lower packages never
 import HTTP or browser code.
 
-The browser sends only a task name, specification, pinned signature, and two locally configured
-model IDs. The server always creates a generated-oracle task. The test-writer receives no
-candidate code. The code-writer receives no test-source parameter—only capped feedback from the
-frozen verifier after a failed attempt.
+The browser authoring flow saves only a task name, specification, and pinned signature in a
+source-free template. Launching a run sends only that server-loaded template ID, an idempotency
+token, and two locally configured model IDs. The server always creates a generated-oracle task.
+The test-writer receives no candidate code. The code-writer receives no test-source
+parameter—only capped feedback from the frozen verifier after a failed attempt.
 
 ## Prerequisites
 
@@ -194,9 +195,14 @@ To use it:
    test-writer models. The server uses its configured reviewer model, falling back to the
    test-writer model when unset.
 3. Start the generated-oracle run and follow its stable run-detail URL.
-4. Inspect the pending oracle stage, then the frozen source, manifest, digest, candidate
-   attempts, and capped feedback.
-5. Download the final run JSON when the run reaches a terminal state.
+4. Read the run-evidence summary first: the precise result claim, task contract, generic oracle
+   lifecycle/review evidence, and mechanical top-level `Test…` inventory. A passing run explains
+   that silent Go output is expected—the candidate built and the frozen test binary completed.
+   This is evidence of agreement with a fixed blind verifier, never proof of arbitrary
+   correctness.
+5. Expand the audit material when needed to inspect the exact frozen source, candidate attempts,
+   capped feedback, manifest, and digests.
+6. Download the final run JSON when the run reaches a terminal state.
 
 Only one browser run may be live at a time. Browser runs are in memory and disappear when the
 server restarts; templates remain in the project-root folder. A browser-generated idempotency token

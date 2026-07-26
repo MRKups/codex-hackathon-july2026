@@ -15,6 +15,7 @@ import (
 	"codex-hackathon-july2026/internal/llm"
 	"codex-hackathon-july2026/internal/oracle"
 	"codex-hackathon-july2026/internal/repair"
+	"codex-hackathon-july2026/internal/verification"
 )
 
 // Status describes the current outcome of a repair run.
@@ -88,6 +89,7 @@ type Run struct {
 	Verification   domain.VerificationManifest `json:"verification"`
 	OracleEvidence oracle.Evidence             `json:"oracleEvidence"`
 	TestCode       string                      `json:"testCode"`
+	TestInventory  verification.TestInventory  `json:"testInventory"`
 	CoderModel     string                      `json:"coderModel"`
 	TesterModel    string                      `json:"testerModel"`
 	Template       TemplateProvenance          `json:"template"`
@@ -258,6 +260,7 @@ func (store *Store) ListRuns() []Run {
 		snapshot := *stored
 		snapshot.Verification = (domain.VerificationBundle{Manifest: stored.Verification}).Clone().Manifest
 		snapshot.OracleEvidence = stored.OracleEvidence.Clone()
+		snapshot.TestInventory = stored.TestInventory.Clone()
 		snapshot.Attempts = append([]domain.Attempt(nil), stored.Attempts...)
 		runs = append(runs, snapshot)
 	}
@@ -323,6 +326,7 @@ func (store *Store) GetRun(id string) (Run, bool) {
 	snapshot := *stored
 	snapshot.Verification = (domain.VerificationBundle{Manifest: stored.Verification}).Clone().Manifest
 	snapshot.OracleEvidence = stored.OracleEvidence.Clone()
+	snapshot.TestInventory = stored.TestInventory.Clone()
 	snapshot.Attempts = make([]domain.Attempt, len(stored.Attempts))
 	copy(snapshot.Attempts, stored.Attempts)
 	return snapshot, true
@@ -514,6 +518,7 @@ func (store *Store) setResolution(ctx context.Context, id string, resolution ora
 	}
 	bundle := resolution.Bundle.Clone()
 	stored.TestCode = bundle.TestCode
+	stored.TestInventory = verification.InspectTestSource(bundle.TestCode)
 	stored.Verification = bundle.Manifest
 	stored.OracleEvidence = resolution.Evidence.Clone()
 	store.logger.Info("run oracle frozen",

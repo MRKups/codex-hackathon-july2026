@@ -436,6 +436,31 @@ Work the phases in order. **Phase 0 must be green before anything in Phase 3+ be
 
 ### Phase 3 — Web server
 
+- [x] **F31 — Generic run-evidence interpretation.** Rework `/runs/{id}` so its first read is a
+  concise, truthful explanation rather than raw Go source. Every task must render from generic,
+  mechanically supported evidence only: the submitted task contract; frozen bundle provenance;
+  oracle lifecycle and bounded reviewer findings; a top-level Go-test inventory; candidate
+  attempt/execution outcomes; and the platform-wide claim boundary. Do not dispatch on task text,
+  infer a problem-family coverage summary, manufacture a confidence/effectiveness score, or let
+  an LLM author post-hoc semantic claims. Preserve the raw frozen source, candidate source,
+  capped output, manifest/digests, and JSON as expandable audit material. A passing execution
+  must clearly state that its silent Go output is normal: the candidate built, the frozen test
+  binary completed, and its assertions did not fail. Failed attempts must retain only the actual
+  generic execution stages reached. Add source inventory with the standard parser only after a
+  bundle freezes; it must never affect its digest, preflight admission, candidate prompts, or
+  the blind-oracle boundary. Depends on: F30, F25.
+  Verification (2026-07-26): `verification.InspectTestSource` now records only frozen,
+  top-level declarations named `Test…` after resolution is accepted; it is non-semantic,
+  excluded from bundle digest/admission, cloned with snapshots, and tested against valid and
+  malformed source. `/runs/{id}` now leads with a generic result claim, concrete successful
+  execution explanation, task contract, bundle/review lifecycle, bounded reviewer findings,
+  and the test-declaration inventory. The exact test/candidate source and manifest are retained
+  as expandable audit material. The successful-output message explicitly explains that Go emits
+  no failure output when the compiled test binary completes. Server tests assert the inventory
+  and generic-evidence copy while retaining the no-HTML-insertion check. `gofmt`, embedded
+  JavaScript syntax, `go build ./...`, `go test -count=1 ./...`, `go test -race ./...`,
+  `go vet ./...`, `go mod verify`, and `git diff --check` passed without a provider call.
+
 - [x] **F30 — Truthful live run-progress display.** The immutable run detail page must make a
   long provider/oracle/verifier operation visibly active without inventing a completion percent.
   Render the server-owned current phase as a human-readable operation, show the current candidate

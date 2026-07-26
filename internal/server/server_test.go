@@ -88,6 +88,9 @@ func TestNewServesInteractiveGeneratedOracleAPI(t *testing.T) {
 	if len(got.Attempts) != 1 || !got.Attempts[0].Passed {
 		t.Fatalf("GET /run attempts = %#v, want one passing attempt", got.Attempts)
 	}
+	if gotNames := strings.Join(got.TestInventory.TopLevelTests, ","); gotNames != "TestIncrement" {
+		t.Fatalf("GET /run test inventory = %q, want TestIncrement", gotNames)
+	}
 }
 
 func TestRunAPIRejectsInvalidCustomInput(t *testing.T) {
@@ -440,8 +443,8 @@ func TestTemplateAPIsRejectUnsafeInputAndPagesAreExplicit(t *testing.T) {
 		if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "innerHTML") {
 			t.Fatalf("GET %s = status %d with unsafe page content", route, response.Code)
 		}
-		if route == "/runs/run_000001" && (!strings.Contains(response.Body.String(), "Run no longer available") || !strings.Contains(response.Body.String(), "Writing blind test oracle") || !strings.Contains(response.Body.String(), "without a completion percentage")) {
-			t.Fatalf("GET %s does not provide truthful live run progress", route)
+		if route == "/runs/run_000001" && (!strings.Contains(response.Body.String(), "Run no longer available") || !strings.Contains(response.Body.String(), "Writing blind test oracle") || !strings.Contains(response.Body.String(), "without a completion percentage") || !strings.Contains(response.Body.String(), "What this result establishes") || !strings.Contains(response.Body.String(), "Frozen test inventory") || !strings.Contains(response.Body.String(), "No verifier output is expected")) {
+			t.Fatalf("GET %s does not provide generic evidence interpretation", route)
 		}
 	}
 	missing := httptest.NewRecorder()

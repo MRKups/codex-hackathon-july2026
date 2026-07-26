@@ -51,7 +51,7 @@ mechanism and are not a second product name.
 │   │   ├── prompt.go             # FirstPrompt, RepairPrompt, TestPrompt, ExtractGoCode
 │   │   └── prompt_test.go
 │   ├── verification/
-│   │   ├── verification.go       # Bundle sealing, validation, and canonical digests
+│   │   ├── verification.go       # Bundle sealing/digests plus post-freeze Test… inventory
 │   │   └── verification_test.go
 │   ├── repair/
 │   │   ├── repair.go             # Executor seam + candidate generation/retry against a sealed bundle
@@ -65,7 +65,7 @@ mechanism and are not a second product name.
 │       ├── templates.html        # Template library page
 │       ├── template.html         # New/edit template authoring page
 │       ├── runs.html             # Template launch and current-process runs page
-│       ├── run.html              # Run analysis with truthful live phase/activity feedback
+│       ├── run.html              # Generic run interpretation plus expandable audit evidence
 │       ├── styles.css            # Shared spartan browser styling and indeterminate activity motion
 │       ├── index.html            # Superseded one-screen page retained as history
 │       ├── server.go             # /api/page routes, safe draft failures, request slog events

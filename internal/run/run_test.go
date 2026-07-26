@@ -215,6 +215,8 @@ func TestStoreKeepsCandidateAttemptZeroUntilResolution(t *testing.T) {
 			close(resolver.release)
 			if got := waitForTerminalRun(t, store, id); got.Status != StatusPassed {
 				t.Fatalf("run status = %q, want passed; error = %q", got.Status, got.Error)
+			} else if len(got.TestInventory.TopLevelTests) == 0 {
+				t.Fatalf("frozen run test inventory = %#v, want top-level test names", got.TestInventory)
 			}
 		})
 	}

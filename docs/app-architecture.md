@@ -351,9 +351,13 @@ verifier data, never HTML insertion. The spartan multi-page workflow separates c
 - `/runs` displays the selected template read-only, limits choices to configured coder/tester
   models, and starts no work until an explicit launch.
 - `/runs/{id}` polls one evidence record, supports cancellation while live, and exposes frozen
-  oracle source, manifest/digests, attempts, capped output, and final JSON download. While live,
-  it displays the server-owned phase, an elapsed timer, and animated indeterminate activity—not a
-  guessed completion percentage—then stops on the actual terminal result.
+  oracle source, manifest/digests, attempts, capped output, and final JSON download. Its lead
+  view is a generic interpretation built only from snapshot facts: task contract, frozen-bundle
+  provenance, review lifecycle/findings, parser-derived top-level `Test…` declarations, and actual generic
+  execution stages. It never labels arbitrary source with task-family semantics or a correctness
+  score; raw source remains audit material. While live, it displays the server-owned phase, an
+  elapsed timer, and animated indeterminate activity—not a guessed completion percentage—then
+  stops on the actual terminal result.
 - Downloaded JSON is the final accepted-evidence snapshot; rejected oracle candidates and raw
   provider wrapper replies are not retained, and there is no disk persistence yet.
 
