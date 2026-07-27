@@ -157,7 +157,7 @@ func ValidateResolution(task domain.Task, resolution Resolution) error {
 
 // ValidateFailureEvidence admits optional non-source generated-oracle evidence attached to a
 // typed failure. It deliberately permits zero evidence for injected test resolvers, while the
-// default F25 resolver records all completed author/reviewer work.
+// default resolver records all completed author/reviewer work.
 func ValidateFailureEvidence(task domain.Task, evidence Evidence) error {
 	if evidence.IsZero() {
 		return nil

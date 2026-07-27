@@ -17,8 +17,6 @@ mechanism and are not a second product name.
 │   └── repair/
 │       ├── main.go               # Composition root, flags, model roles, template-root/log wiring
 │       └── main_test.go
-├── challenges/
-│   └── pi-prime-chunks.md         # Standalone challenge specification; not runtime verifier code
 ├── internal/
 │   ├── domain/
 │   │   ├── domain.go             # Task, OracleMode, VerificationBundle values, Attempt
@@ -73,29 +71,15 @@ mechanism and are not a second product name.
 ├── docs/
 │   ├── go-repair-loop.md         # Test Verifier system design and behavior contract
 │   ├── app-architecture.md       # This system’s current architecture
-│   ├── design-change-2026-07-18.md
 │   ├── file-structure.md         # This file
-│   └── tracker.md                # Completed and remaining work
+│   └── tracker.md                # Open work
 ├── templates/                    # Versioned, source-free starter task templates
 │   ├── dedupe-strings/template.json
+│   ├── pi-prime-chunks/template.json
 │   ├── reverse-ascii/template.json
 │   ├── semver-compare/template.json
 │   ├── split-cents/template.json
 │   └── word-wrap/template.json
-└── _archive/
-    ├── llm/
-    │   ├── client.go             # Superseded handwritten provider transport
-    │   ├── client_test.go
-    │   └── live_test.go
-    ├── mincoins-profile-v1/
-    │   ├── minimum-coin-change.md
-    │   ├── profile.go
-    │   └── profile_test.go
-    ├── rulebook-v1/
-    │   ├── rulebook.go           # Superseded one-off F20 compiler; retained as history
-    │   ├── mincoins.go
-    │   └── rulebook_test.go
-    └── web/embed.go              # Superseded embedding sketch; excluded from build
 ```
 
 ## Data boundaries
@@ -115,13 +99,13 @@ mechanism and are not a second product name.
 - **Downloaded run JSON** is a final accepted-evidence snapshot, not a repository artifact,
   persistent event log, or record of rejected oracle candidates.
 
-## Planned additions
+## Structural boundaries
 
 `internal/oracle/` and the candidate-side `repair.Executor` are explicitly wired at `cmd/repair`,
-not a plugin registry, task-profile directory, or generic workflow framework. F25's bounded
-reviewer/revision pass lives inside `internal/oracle`. `internal/template/` owns a project-root
+not a plugin registry, task-profile directory, or generic workflow framework. The bounded
+reviewer/revision pass lives inside `internal/oracle`. `internal/template/` owns the project-root
 `templates/` directory for source-free task-template JSON only; it is not an authored-oracle
 loader and does not store generated test source. The browser uses explicit embedded authoring,
-launch, and run-analysis documents plus one shared stylesheet. SQLite persistence, SSE, attempt
-diffs, and stronger-oracle research
-are still stretch work. Do not create them as scaffolding before there is a concrete tracker item.
+launch, and run-analysis documents plus one shared stylesheet.
+
+Do not scaffold for an open tracker item before starting it.

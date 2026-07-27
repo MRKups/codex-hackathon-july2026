@@ -16,6 +16,13 @@ tests themselves.
 
 An oracle is legitimate only when it was written without seeing the solution it judges.
 
+What matters is what the oracle author saw, not who it was. An earlier version of this rule
+required a *human* author. That conflated two separate things and only the second is
+load-bearing: requiring a human bought no extra integrity, did not scale past a handful of
+hand-written test files, and left the specification itself untested by anything. `authored` mode
+survives as the control condition that makes generated mode measurable — it is not legacy, and
+must not be deleted or left to rot.
+
 | Mode | Oracle source | Test writer sees | Green means |
 |---|---|---|---|
 | `authored` | Human-written `solution_test.go` | Task only | Candidate passed an independent fixed oracle. |
@@ -24,6 +31,14 @@ An oracle is legitimate only when it was written without seeing the solution it 
 The generated result is not “verified correctness.” The same model family can interpret vague
 prose the same way twice. Separate selectable role models mitigate that risk but do not eliminate
 it.
+
+In generated mode a failing run therefore has two possible meanings: the candidate is wrong, or
+the specification was ambiguous and the coder and test-writer resolved it differently. The second
+is the more interesting one, because nothing else in the system tests the specification. A
+persistent disagreement — the same assertion failing while the candidate visibly changes approach
+— is worth inspecting on those grounds, but it does not prove the specification is
+underspecified: candidate ability, oracle quality, and repair feedback are all confounders. See
+F18 for the recorded signal.
 
 Three structural invariants keep the flow honest:
 
@@ -80,6 +95,14 @@ func SplitCents(total, recipients int) ([]int, error)
 The signature is not cosmetic. It pins the shared API so independently generated tests and code
 can compile together. Browser validation rejects blank, oversized, malformed, type-invalid,
 method, multi-declaration, or function-body signatures before any provider call.
+
+Task material should be pure, standard-library-only, fast, and deterministic — and should carry
+*natural* ambiguity: cases where a reasonable person could go either way and most specifications
+never say which. That is what makes a disagreement between an independently written oracle and an
+independently written candidate informative rather than noise. The committed starter templates are
+chosen on that basis — remainder allocation (who gets the extra cent), semver prerelease ordering,
+word wrapping when a single word exceeds the line. Date arithmetic (what is January 31 plus one
+month?) is another good source.
 
 ```go
 type OracleMode string
@@ -147,10 +170,10 @@ temp-directory/file/process failure, or invalid user signature remains an ordina
 error rather than an oracle verdict. These structural checks are a guardrail, not proof that a
 generated oracle is semantically complete.
 
-## Oracle Rulebook and bounded review pipeline (F24–F25)
+## Oracle Rulebook and bounded review pipeline
 
-F24 adds universal guidance, not a task-specific verifier. `internal/oracle` owns a checked-in,
-versioned Oracle Rulebook and includes it in every generated oracle-author prompt. It requires
+The Rulebook is universal guidance, not a task-specific verifier. `internal/oracle` owns a
+checked-in, versioned Oracle Rulebook and includes it in every generated oracle-author prompt. It requires
 source to derive only from the submitted spec/signature; prefer validity, boundary, error,
 mutation, determinism, round-trip, and metamorphic checks; avoid untrusted non-trivial answer
 keys; and avoid unsupported exactness or optimality claims rather than inventing a solution. It is
@@ -171,7 +194,7 @@ oracle author + Rulebook → structural preflight → reviewer
 existing candidate-repair loop
 ```
 
-F25 provides exactly one review pass after structural admission. The reviewer may see the proposed
+There is exactly one review pass after structural admission. The reviewer may see the proposed
 oracle source, spec, signature, and Rulebook, but never candidate code. Its untrusted output is
 strict, size-bounded JSON: `accept`, `revise`, or `reject`, plus at most six generic findings.
 `revise` permits one author replacement and one final structural preflight; it never starts a
@@ -328,7 +351,7 @@ or an arbitrary model field. The current OpenAI adapter uses the official SDK's 
 surface with the explicitly configured base URL; a future Responses migration is a separate
 behavior change, not an implicit transport detail.
 
-## Operational observability (F28)
+## Operational observability
 
 The browser does not receive provider diagnostics, prompts, or raw model output. Instead, the
 composition root writes structured `slog` events to stderr through the narrow `tint` handler.
@@ -354,13 +377,8 @@ It deliberately does not estimate a percentage: oracle revision and bounded cand
 the remaining work is not known truthfully. A terminal snapshot stops the animation and shows its
 actual result.
 
-## Deferred work
+## Open work
 
-- F5: prompt tuning on a handful of real tasks.
-- F18: optional persistent/varied failure classification.
-- F10/F11/F13/F14: diffs, stronger oracle research, SSE, and persistence.
-- C2: transport/retry hardening before repeated external or production use.
-
-Keep the current flow transparent rather than “clever.” A real model can pass on attempt one;
-the page must show that honestly. Save a genuinely observed multi-attempt JSON trace if a
-repeatable repair walkthrough is needed.
+Tracked in `docs/tracker.md`. Whatever lands there, keep the flow transparent rather than
+“clever”: a real model can pass on attempt one, and the page must show that honestly. Save a
+genuinely observed multi-attempt JSON trace if a repeatable repair walkthrough is needed.

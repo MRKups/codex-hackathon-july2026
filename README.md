@@ -154,7 +154,7 @@ Useful development checks:
 go test -race ./...
 go test -cover ./...
 go mod verify
-gofmt -l $(find . -name '*.go' -not -path './_archive/*')
+gofmt -l .
 ```
 
 To make a product-named local executable while retaining the stable command directory:
@@ -185,8 +185,9 @@ local address. Press `Ctrl-C` to stop the server.
 
 To use it:
 
-1. Open **Templates**. The repository includes five editable starter templates: Split cents, Word
-   wrap, Compare semantic versions, Reverse ASCII text, and Deduplicate strings. Create another
+1. Open **Templates**. The repository includes six editable starter templates: Split cents, Word
+   wrap, Compare semantic versions, Reverse ASCII text, Deduplicate strings, and Pi prime chunks.
+   Create another
    source-free task template—or edit a starter—and save its name, specification, and confirmed Go
    signature under `templates/<id>/template.json`. You may request a syntax-valid signature draft
    from the selected test-writer model, then explicitly apply or edit it; drafting never starts a
@@ -255,6 +256,5 @@ LLM_LIVE_TEST=run go test -tags=integration ./internal/llm/openai \
 
 - [System design](docs/go-repair-loop.md)
 - [Application architecture](docs/app-architecture.md)
-- [Historical blind-oracle design change](docs/design-change-2026-07-18.md)
 - [Implementation tracker](docs/tracker.md)
 - [Repository layout](docs/file-structure.md)

@@ -69,12 +69,19 @@ Keep this file short. A bloated rules file gets partially ignored.
 - **Formatting is canonical.** `gofmt` and `go vet` must be clean before anything is
   "done." Canonical formatting keeps generated diffs small and reviewable.
 
-- **Archive, don't delete.** Superseded code moves to `_archive/` (excluded from build), not
-  the trash, so it stays available as reference.
+- **Delete superseded code; Git is the archive.** Remove replaced code in the commit that
+  replaces it, and name the superseding work in the message. Do not keep a parallel `_archive/`
+  tree: a reader cannot tell live code from dead code at a glance, and Git already preserves
+  every earlier version.
 
 - **The docs are the source of truth.** `docs/go-repair-loop.md` is the design;
   `docs/tracker.md` is the work list. Decisions are made there first, then implemented. If
   the plan and the code conflict, the plan wins — update the code.
+
+- **The tracker holds open work only.** Delete an item when it ships; do not leave a completed
+  entry or a record of how it was verified. Git history says what changed. If finishing an item
+  established a standing rule, write that rule into the relevant design doc and drop it from the
+  tracker.
 
 ## Agent Behavioral Rules
 
@@ -83,12 +90,11 @@ Keep this file short. A bloated rules file gets partially ignored.
   packages, the loop, or the HTTP layer. Follow existing conventions instead of inventing new
   ones.
 
-- **Build in phase order.** Work the phases in `docs/tracker.md` in order. **Do not build the
-  web server or UI before the terminal loop is green (Phase 0).** A working loop with no UI
-  beats a UI over a broken loop.
+- **Respect stated dependencies.** Tracker items name what they depend on; do not start one
+  whose dependency is still open. A working loop with no UI beats a UI over a broken loop.
 
 - **Verify before claiming done.** Run `go build ./...` and `go test ./...` (the project's own
-  tests) and confirm they pass. Record how you verified on the tracker item.
+  tests) and confirm they pass before saying an item is finished.
 
 - **Small diffs, one item at a time.** Take one tracker ID per change. Keep the diff scoped to
   it.

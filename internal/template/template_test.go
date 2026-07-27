@@ -87,6 +87,7 @@ func TestCommittedStarterTemplatesAreLoadable(t *testing.T) {
 	}
 	want := []string{
 		"dedupe-strings",
+		"pi-prime-chunks",
 		"reverse-ascii",
 		"semver-compare",
 		"split-cents",

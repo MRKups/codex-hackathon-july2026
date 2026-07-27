@@ -52,6 +52,11 @@ overstate a generated green result.
   sandbox.
 - **In-memory state.** Runs disappear when the process exits.
 - **One live browser run.** The store rejects a second start, even if a caller bypasses the UI.
+- **No task-profile registry.** The platform must not recognize a problem family, match on task
+  text, ship a hidden profile route, or carry speculative profile plumbing. There are two generic
+  delivery paths only: authored source from a trusted caller, and blind generated source from the
+  test-writer. The Rulebook may guide every generated run, but only as universal non-executable
+  policy — never a task selector, expected-value store, or reference implementation.
 
 ## Package direction
 
@@ -68,7 +73,7 @@ factory, creates the allowed model catalog, constructs the checked-in Rulebook p
 oracle resolver and candidate executor, sets role defaults, injects presets, and wires `server`
 to `run`. No lower package imports an upper package.
 
-## Modular composition rule (F24–F26 implemented)
+## Modular composition rule
 
 “Plug-and-play” here means explicit, small replacement seams—not a dynamically registered
 pipeline whose ordering is hard to audit. The current component direction is:
@@ -343,8 +348,9 @@ conflicts return `409`.
 
 ## Browser behavior
 
-The page is a single embedded `index.html`. It uses `textContent`/DOM nodes for all provider and
-verifier data, never HTML insertion. The spartan multi-page workflow separates concerns:
+Every page is an embedded static document that uses `textContent`/DOM nodes for all provider and
+verifier data, never HTML insertion. `/` redirects to `/templates`. The spartan multi-page workflow
+separates concerns:
 
 - `/templates` lists templates; `/templates/new` and `/templates/{id}` author only name, spec,
   and signature. Signature drafting requires explicit application.
@@ -361,25 +367,28 @@ verifier data, never HTML insertion. The spartan multi-page workflow separates c
 - Downloaded JSON is the final accepted-evidence snapshot; rejected oracle candidates and raw
   provider wrapper replies are not retained, and there is no disk persistence yet.
 
-## Task-template workflow (F6/F27)
+Because runs are in memory, a `/runs/{id}` URL from an earlier server process is not corrupt
+evidence — that process no longer owns the snapshot. The detail page must say so explicitly and
+send the user back to `/runs`. It must never leave a loading state up, which would imply the
+verifier is still working.
 
-F6 introduced a source-free,
-project-root `templates/` repository, manually constructed at `cmd/repair` and injected into
-`server`. A template is not a run and is not verification evidence: it contains only a stable ID,
-display name, specification, and user-confirmed signature. It has no test source, expected value,
+## Task-template workflow
+
+The source-free, project-root `templates/` repository is constructed at `cmd/repair` and injected
+into `server`. A template is not a run and is not verification evidence: it contains only a stable
+ID, display name, specification, and user-confirmed signature — no test source, expected value,
 Rulebook material, model selection, provider configuration, oracle mode, or bundle. The repository
-does not import `run`, `oracle`, or `repair`; `server` loads a selected template, constructs the
-same generated `OracleGenerated` task, and starts the existing store.
+does not import `run`, `oracle`, or `repair`; `server` loads a selected template, constructs a
+generated `OracleGenerated` task, and starts the store.
 
-F27 replaces the single document with explicit embedded routes for the template library and
-authoring pages, the template-launch page, and a stable per-run analysis page. Model selection is
-made only when launching a run; a saved template stays provider-agnostic. The run snapshot copies
-the submitted task as it does today and carries an optional template ID/content digest for
-provenance. Editing a template therefore cannot alter an already-started or historical run.
-Template files persist across restarts, while run snapshots remain in memory until a separate
-persistence decision; final downloaded JSON remains the portable evidence record. Every browser
-launch remains generated-oracle mode, and the test writer still resolves/freezes the bundle before
-candidate generation.
+Explicit embedded routes serve the template library and authoring pages, the template-launch page,
+and a stable per-run analysis page. Model selection happens only at launch, so a saved template
+stays provider-agnostic. The run snapshot copies the submitted task and carries an optional
+template ID and content digest for provenance, so editing a template cannot alter an already
+started or historical run. Template files persist across restarts; run snapshots remain in memory
+until a separate persistence decision, and downloaded JSON remains the portable evidence record.
+Every browser launch is generated-oracle mode, and the test writer resolves and freezes the bundle
+before candidate generation.
 
 ## Deployment
 
